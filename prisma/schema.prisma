@@ -1,0 +1,299 @@
+// 视频号信息流编导脚本编写 Agent —— 逻辑数据模型（PRD v1.1 第 9 章）
+// 说明：字段名为研发参考；Excel 只是交付视图，不是系统唯一存储。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// 用户 User：所有业务资源归属用户；认证信息按安全方式存储
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  displayName  String
+  passwordHash String
+  role         String   @default("EDITOR") // EDITOR 编导 / MAINTAINER 部署维护人员
+  status       String   @default("ACTIVE") // ACTIVE / DISABLED
+  createdAt    DateTime @default(now())
+
+  batches   Batch[]
+  videos    Video[]
+  exports   ExportRecord[]
+  sessions  Session[]
+}
+
+/// 会话 Session：登录态与后端资源鉴权（PRD 2.1 实现约定）
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// 批次 Batch：一批多视频；可跨批次导出
+model Batch {
+  id         String   @id @default(cuid())
+  ownerId    String
+  note       String?
+  createdAt  DateTime @default(now())
+  clientKey  String?  // 同一次提交的幂等标识
+
+  owner  User    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  videos Video[]
+
+  @@unique([ownerId, clientKey])
+}
+
+/// 媒体资产 MediaAsset：主机缓存副本；原文件路径与项目缓存路径分开记录
+model MediaAsset {
+  id          String   @id @default(cuid())
+  videoId     String   @unique
+  cachePath   String
+  fileName    String
+  sizeBytes   BigInt   @default(0)
+  durationMs  Int      @default(0)
+  width       Int?
+  height      Int?
+  hasAudio    Boolean  @default(true)
+  status      String   @default("PENDING") // PENDING / READY / FAILED
+  failReason  String?
+  sha256      String?
+  createdAt   DateTime @default(now())
+
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([videoId])
+}
+
+/// 视频 Video：原始信息与人工修订分开记录；相同标题允许存在
+model Video {
+  id            String   @id @default(cuid())
+  ownerId       String
+  batchId       String?
+  title         String?  // 工作台可改的任务标题，人工填写优先 → 成功获取的原始标题 → 缺失为“未提供”
+  titleSource   String   @default("NONE") // MANUAL / FETCHED / NONE
+  /// 原视频标题（2026-09-16 新增）：本地导入 = 原文件的文件名；链接导入 = 链接对应网页的标题。
+  /// 与 title 分开保存：title 可被人工修改，本字段保留「原样」，不被人工编辑覆盖。
+  sourceTitle   String?
+  sourceType    String   @default("LOCAL") // LOCAL / TENCENT_MUSE
+  sourceUrl     String?  // 原始来源链接，不以最终下载地址替换
+  sourceUrlText String?  // 原始可读文本
+  fileName      String?  // 原文件名，独立保存，不冒充标题
+  originalPath  String?  // 编导电脑上的本地原文件绝对路径，人工选填
+  durationMs    Int?
+  status        String   @default("UPLOADING")
+  // UPLOADING / QUEUED / PROCESSING / COMPLETED / PARTIAL / FAILED / UNSUPPORTED / CANCELLED
+  currentStage  String?
+  problemFlags  String   @default("[]") // JSON 数组：识别层面的问题标记（与复核状态分开）
+  seq           Int?     // 服务端提交成功时分配的全局递增序号
+  clientRowKey  String?  // 同一次提交内用于幂等
+  /// 妙思原网页板块快照（JSON，填充工作台「视频分析」栏）：人群分析（性别/年龄）、视频分镜或高光时序 title、
+  /// 创意标签全量、取值来源与缺失原因。取不到时保存为空值并在原因里说明，不留空无据。
+  sourceInsight String   @default("{}")
+  createdAt     DateTime @default(now())
+  deletedAt     DateTime?
+
+  owner       User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  batch       Batch?          @relation(fields: [batchId], references: [id])
+  media       MediaAsset?
+  attempts    Attempt[]
+  revisions   ScriptRevision[]
+  classification Classification?
+  exportItems ExportItem[]
+
+  @@index([ownerId, status])
+  @@index([status, seq])
+}
+
+/// 执行 Attempt：每次重试或重新解析独立编号；保留尝试历史
+model Attempt {
+  id            String    @id @default(cuid())
+  videoId       String
+  queueSeq      Int
+  kind          String    @default("INITIAL") // INITIAL / RETRY / REPARSE
+  status        String    @default("QUEUED")  // QUEUED / RUNNING / SUCCEEDED / PARTIAL / FAILED / UNSUPPORTED / CANCELLED
+  stage         String?   // FETCH / CACHE / VALIDATE / CLASSIFY / ASR / VISION / ORGANIZE / SAVE
+  errorCode     String?
+  errorMessage  String?
+  retryIndex    Int       @default(0)
+  modelConfigVersion String @default("v1.1")
+  ruleVersion   String    @default("prd-v1.1")
+  heartbeatAt   DateTime?
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  video   Video          @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  usages  ModelUsage[]
+  revisions ScriptRevision[]
+
+  @@index([videoId])
+  @@index([status])
+}
+
+/// 脚本版本 ScriptRevision：生成结果、人工编辑和历史版本可追溯
+model ScriptRevision {
+  id           String   @id @default(cuid())
+  videoId      String
+  attemptId    String?
+  versionNo    Int
+  isCurrent    Boolean  @default(false)
+  reviewStatus String   @default("NOT_REVIEWED") // NOT_REVIEWED / REVIEWED
+  reviewedAt   DateTime?
+  reviewProblemAck String @default("[]") // 标记复核时已确认的问题项
+  savedAt      DateTime @default(now())
+  problems     String   @default("[]") // JSON：本版本的问题列表（漏段/改写/时间越界等）
+  /// 「视频分析」栏的画面场景：整条视频只出现一次的概览（来源：画面理解），
+  /// 不再逐段标注；混剪时为空。人工可在复核界面直接修订。
+  sceneOverview String  @default("")
+  /// 「脚本文案」栏：音频转写模型输出的整段原文（不切分、不改写），工作台可直接人工编辑；
+  /// 与「脚本分段与标签」无关，仅作为完整文案原文的存档与导出来源。
+  transcriptText String  @default("")
+  createdBy    String   @default("AI") // AI / HUMAN
+
+  video   Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  attempt Attempt? @relation(fields: [attemptId], references: [id])
+  segments Segment[]
+  exportItems ExportItem[]
+
+  @@unique([videoId, versionNo])
+  @@index([videoId, isCurrent])
+}
+
+/// 段落 Segment：保留原视频顺序；不只存展示字符串
+model Segment {
+  id            String @id @default(cuid())
+  revisionId    String
+  orderIndex    Int
+  startMs       Int
+  endMs         Int
+  copyText      String @default("")   // 该段转写原文（一字不改）
+  /// 独有标签：人设 / 痛点 / 干货（解决方案）/ 营销内容（产品介绍）/ 福利 / 其他。
+  /// 每段只能有一个标签，不允许重复标注；无法归入前五类时统一归「其他」。
+  /// 2026-09-16 需求方删除「场景」标签：模型若仍输出场景，一律归入「痛点」。
+  tag           String @default("")
+  voiceover     String @default("")   // 废弃：旁白已并入标签列，保留字段兼容历史版本
+  makeup        String @default("")   // C 妆造（显示值，允许“同上”）
+  makeupFull    String @default("")   // C 妆造完整描述（数据层可还原）
+  emotion       String @default("")   // G 情绪
+  problemFlags  String @default("[]") // 字段级问题标记
+  timeUncertain Boolean @default(false)
+
+  revision    ScriptRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+  screenshots Screenshot[]
+
+  @@index([revisionId, orderIndex])
+}
+
+/// 截图 Screenshot：记录自动或人工截取，不以临时 URL 作为唯一地址
+model Screenshot {
+  id         String   @id @default(cuid())
+  segmentId  String
+  timeMs     Int
+  filePath   String
+  width      Int?
+  height     Int?
+  source     String   @default("AUTO") // AUTO / MANUAL
+  failReason String?
+  createdAt  DateTime @default(now())
+
+  segment Segment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+
+  @@index([segmentId])
+}
+
+/// 形式 Classification：人工覆盖优先；不能把估计当事实
+model Classification {
+  id              String   @id @default(cuid())
+  videoId         String   @unique
+  attemptId       String?
+  category        String   // 混剪 / ai视频 / 有ai片段 / 真人口播 / 真人访谈 / 其他 / 待复核
+  categoryLabel   String   // 展示用（含“其他及简短说明”）
+  aiUnionMs       Int      @default(0)
+  aiRatio         Float    @default(0)
+  ratioEstimated  Boolean  @default(true)
+  evidence        String   @default("")
+  uncertain       Boolean  @default(false)
+  manualOverride  Boolean  @default(false)
+  overriddenBy    String?
+  overriddenAt    DateTime?
+  modelVersion    String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+}
+
+/// 导出 Export：使用版本快照，下载必须鉴权
+model ExportRecord {
+  id        String   @id @default(cuid())
+  ownerId   String
+  status    String   @default("READY") // READY / FAILED
+  filePath  String?
+  fileName  String
+  itemCount Int      @default(0)
+  errorMessage String?
+  createdAt DateTime @default(now())
+
+  owner User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  items ExportItem[]
+}
+
+model ExportItem {
+  id         String @id @default(cuid())
+  exportId   String
+  videoId    String
+  revisionId String
+  orderIndex Int
+
+  export   ExportRecord   @relation(fields: [exportId], references: [id], onDelete: Cascade)
+  video    Video          @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  revision ScriptRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+
+  @@index([exportId])
+}
+
+/// 模型调用用量记录：费用与耗时记录（PRD 11.5）
+model ModelUsage {
+  id              String   @id @default(cuid())
+  attemptId       String
+  callNo          Int
+  capability      String   // ASR / VISION / ORGANIZE
+  vendor          String   @default("aliyun-bailian")
+  region          String   @default("beijing")
+  modelId         String
+  modelVersion    String?
+  status          String   @default("SUCCEEDED") // SUCCEEDED / FAILED
+  audioSeconds    Float?
+  inputTokens     Int?
+  outputTokens    Int?
+  thinkingTokens  Int?
+  retryIndex      Int      @default(0)
+  currency        String   @default("CNY")
+  priceVersion    String   @default("2026-09-12")
+  estimatedCost   Float?
+  usageMissing    Boolean  @default(false) // 用量缺失 → 费用待核对
+  vendorRequestId String?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  errorMessage    String?
+
+  attempt Attempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  @@index([attemptId])
+}
+
+/// 全局递增序号计数器（排队序号由服务端提交成功时分配）
+model Counter {
+  name  String @id
+  value Int    @default(0)
+}

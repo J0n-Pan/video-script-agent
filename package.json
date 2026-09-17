@@ -1,0 +1,59 @@
+{
+  "name": "video-script-agent",
+  "version": "1.1.0",
+  "private": true,
+  "description": "视频号信息流编导脚本编写 Agent —— 本地部署版（PRD v1.1）",
+  "scripts": {
+    "dev:web": "next dev -p 3939",
+    "build": "next build",
+    "start": "next start -p 3939",
+    "worker": "tsx src/worker/index.ts",
+    "dev": "concurrently -n web,worker -c cyan,magenta \"npm:dev:web\" \"npm:worker\"",
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
+    "db:seed": "tsx prisma/seed.ts",
+    "setup": "prisma generate && prisma db push && tsx prisma/seed.ts",
+    "make:test-media": "tsx scripts/make-test-media.ts",
+    "make:speech-media": "tsx scripts/make-speech-media.ts",
+    "check:ai": "tsx scripts/check-dashscope.ts",
+    "check:vision": "tsx scripts/check-vision-material.ts",
+    "bench:models": "tsx scripts/bench-models.ts",
+    "muse:login": "tsx scripts/muse-login.ts",
+    "muse:check": "tsx scripts/muse-login.ts --check",
+    "muse:probe": "tsx scripts/muse-probe.ts",
+    "muse:detail": "tsx scripts/muse-detail-replay.ts",
+    "muse:insight": "tsx scripts/muse-insight-check.ts",
+    "muse:blocks": "tsx scripts/muse-blocks-probe.ts",
+    "verify:muse": "node scripts/verify-muse-e2e.mjs",
+    "diag:segment": "tsx scripts/diag-segment.ts",
+    "backfill:title": "tsx scripts/backfill-source-title.ts",
+    "migrate:form": "tsx scripts/migrate-form-values.ts",
+    "verify:branches": "tsx scripts/verify-branches.ts",
+    "verify:branches:unit": "tsx scripts/verify-branches.ts --unit-only"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "bcryptjs": "^2.4.3",
+    "exceljs": "^4.4.0",
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0",
+    "next": "^14.2.35",
+    "playwright": "^1.63.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.7.5",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.1",
+    "concurrently": "^9.0.1",
+    "prisma": "^5.22.0",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  }
+}
