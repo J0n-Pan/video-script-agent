@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import { readUserArg, resolveMuseTarget, type MuseTarget } from './_muse-target';
+import { prisma } from '../src/lib/db';
 import path from 'node:path';
 import { cfg } from '../src/lib/config';
 import { openMuseBrowser, sessionInfo, waitForAppReady } from '../src/lib/sources/muse-browser';
@@ -59,10 +61,14 @@ function hunt(node: unknown, words: string[], p = '$', out: Array<[string, unkno
 (async () => {
   if (!url) {
     console.log('\n用法：npm run muse:blocks -- "<妙思单条素材链接>" [--headed] [--grep=人群,分镜]\n');
+    await prisma.$disconnect();
+
     process.exit(2);
   }
   console.log('\n══ 妙思详情页板块探针 ══');
-  const info = sessionInfo();
+  const target = await resolveMuseTarget(readUserArg(args));
+  console.log(`  会话归属：${target.displayName}（${target.username}）`);
+  const info = sessionInfo(target.storageStatePath);
   console.log(`  链接   ${url}`);
   console.log(`  会话   ${info.exists ? `${info.cookies} 条 cookie` : '不存在，需 npm run muse:login'}`);
   console.log(`  关键词 ${GREP.join('、')}\n`);
@@ -70,7 +76,7 @@ function hunt(node: unknown, words: string[], p = '$', out: Array<[string, unkno
   const records: JsonRecord[] = [];
   let browser: Awaited<ReturnType<typeof openMuseBrowser>> | null = null;
   try {
-    browser = await openMuseBrowser({ headless: !HEADED, storageState: info.exists ? cfg.muse.storageState : null });
+    browser = await openMuseBrowser({ headless: !HEADED, storageState: info.exists ? target.storageStatePath : null });
     const page = await browser.context.newPage();
 
     page.on('response', async (res: any) => {

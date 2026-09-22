@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import { readUserArg, resolveMuseTarget, type MuseTarget } from './_muse-target';
+import { prisma } from '../src/lib/db';
 import path from 'node:path';
 import { cfg } from '../src/lib/config';
 import {
@@ -86,6 +88,8 @@ async function discoverRoutes(page: any, startUrl: string): Promise<Array<[strin
 if (!url && !NAV_MODE) {
   console.log('\n用法：npm run muse:probe -- "<妙思单条素材链接>" [--headed] [--all] [--download]');
   console.log('      npm run muse:probe -- --nav            # 只做导航路由发现，摸清资产/成品库地址\n');
+  await prisma.$disconnect();
+
   process.exit(2);
 }
 const targetUrl = url ?? cfg.muse.loginUrl;
@@ -95,7 +99,9 @@ const targetUrl = url ?? cfg.muse.loginUrl;
   console.log('\n══ 腾讯妙思素材抓取诊断 ══');
 
   bar('配置');
-  const info = sessionInfo();
+  const target: MuseTarget = await resolveMuseTarget(readUserArg(args));
+  console.log(`  会话归属：${target.displayName}（${target.username}）`);
+  const info = sessionInfo(target.storageStatePath);
   line('链接', targetUrl);
   line('会话文件', info.path);
   line(
@@ -117,7 +123,7 @@ const targetUrl = url ?? cfg.muse.loginUrl;
   try {
     browser = await openMuseBrowser({
       headless: !HEADED,
-      storageState: info.exists ? cfg.muse.storageState : null,
+      storageState: info.exists ? target.storageStatePath : null,
     });
     const page = await browser.context.newPage();
 
@@ -221,7 +227,7 @@ const targetUrl = url ?? cfg.muse.loginUrl;
     if (DO_DOWNLOAD) {
       bar('正式适配器下载验证');
       const probeVideoId = `probe-${Date.now()}`;
-      const r = await new TencentMuseSourceAdapter().fetch({ videoId: probeVideoId, url: targetUrl });
+      const r = await new TencentMuseSourceAdapter().fetch({ videoId: probeVideoId, url: targetUrl }, { ownerId: target.userId });
       if (r.ok) {
         const size = fs.statSync(r.localPath).size;
         line('结果', '成功');

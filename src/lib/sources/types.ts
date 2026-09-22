@@ -40,9 +40,24 @@ export type SourceFetchFail = {
 
 export type SourceFetchResult = SourceFetchOk | SourceFetchFail;
 
+/**
+ * 取源上下文（2026-09-22 需求迭代）。
+ *
+ * 为什么必须带上 ownerId：腾讯妙思会话已从「全机器一份」改为**一人一份**
+ * （每个编导扫自己的妙思账号）。抓取时必须用**任务归属人**的会话 ——
+ * 用别人的会话不只可能失败，更严重的是**会拿到对方账号可见的素材**，
+ * 那属于越权。
+ */
+export type SourceContext = {
+  ownerId: string;
+};
+
 export interface SourceAdapter {
   readonly kind: 'LOCAL' | 'TENCENT_MUSE';
   /** 登录态检查：不长期占用解析槽位，缺失/过期立即返回 */
-  checkAvailability(): Promise<{ ok: true } | SourceFetchFail>;
-  fetch(input: { videoId: string; url?: string | null; stagedPath?: string | null; fileName?: string | null }): Promise<SourceFetchResult>;
+  checkAvailability(ctx: SourceContext): Promise<{ ok: true } | SourceFetchFail>;
+  fetch(
+    input: { videoId: string; url?: string | null; stagedPath?: string | null; fileName?: string | null },
+    ctx: SourceContext,
+  ): Promise<SourceFetchResult>;
 }

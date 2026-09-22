@@ -1,5 +1,14 @@
 // 领域常量：状态字典、缺失值字典、固定九列（PRD 5.3 / 5.5 / 6.2）
 
+/**
+ * 工作台的对外名称（页头 / 登录页 / 浏览器标签 / 导出文件的 Excel「作者」属性）。
+ *
+ * 为什么收成常量：2026-09-22 改名时发现这个名字原本散在 6 个文件里（页头、登录页、
+ * 标签页 + 3 个导出的 wb.creator），改一次要 grep 一遍还容易漏。
+ * 以后改名只动这一处。
+ */
+export const APP_NAME = '信息流编导工作台';
+
 /** 处理状态字典（PRD 6.2） */
 export const VIDEO_STATUS = {
   UPLOADING: 'UPLOADING',
@@ -138,16 +147,25 @@ export const TAG_COLUMN_OFFSET = BASIC_INFO_COLUMNS.length + 1;
 export const EXPORT_KIND = {
   SCRIPT: 'SCRIPT',
   LIBRARY: 'LIBRARY',
+  /** 改写稿导出：独立类型，不覆盖原有两种（需求文档 §9） */
+  REWRITE: 'REWRITE',
 } as const;
 export type ExportKind = (typeof EXPORT_KIND)[keyof typeof EXPORT_KIND];
 
 export const EXPORT_KIND_LABEL: Record<string, string> = {
   [EXPORT_KIND.SCRIPT]: '信息流脚本',
   [EXPORT_KIND.LIBRARY]: '信息流素材库',
+  [EXPORT_KIND.REWRITE]: '信息流文案改写稿',
 };
 
 /** 「信息流脚本」表的列名（2026-09-16 需求方确认：第一列表头就是「序号 / 时间」） */
 export const SCRIPT_COLUMNS = ['序号 / 时间', '标签', '文案'] as const;
+
+/**
+ * 改写稿导出表的列名（2026-09-20）。
+ * 「预计口播时长」明确标「估算」：改写稿没有真实时间码，不能让编导误当成参考片的时间码。
+ */
+export const REWRITE_COLUMNS = ['稿件版本', '序号', '标签', '正文', '预计口播时长（估算）'] as const;
 
 /**
  * 妙思「创意标签」的展示顺序（2026-09-16 需求方确认）。

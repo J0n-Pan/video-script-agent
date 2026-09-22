@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { APP_NAME } from '@/lib/constants';
+import { clearMuseAutoCheck } from '@/lib/muse-ui';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -25,6 +27,9 @@ export default function LoginPage() {
         setError(j.error ?? '登录失败');
         return;
       }
+      // 每次登录工作台都要重走一遍妙思自动检查，所以这里清掉「本浏览器已检查过」的记忆。
+      // 放在登录成功这个唯一必然经过的点上（登出不一定发生：可能直接关标签页）。
+      clearMuseAutoCheck(j.data?.id ?? '');
       router.replace('/tasks');
       router.refresh();
     } catch (err) {
@@ -37,8 +42,7 @@ export default function LoginPage() {
   return (
     <div className="login-wrap">
       <form className="login-box" onSubmit={submit}>
-        <h1>视频号信息流编导脚本编写 Agent</h1>
-        <div className="sub">本机部署版 · PRD v1.1 · 仅本机浏览器访问</div>
+        <h1>{APP_NAME}</h1>
         {error && <div className="banner danger">{error}</div>}
         <div className="field">
           <label>账号</label>
@@ -56,11 +60,6 @@ export default function LoginPage() {
         <button className="primary" style={{ width: '100%', padding: '9px' }} disabled={busy}>
           {busy ? '登录中…' : '登录'}
         </button>
-        <div className="mute2" style={{ marginTop: 16, lineHeight: 1.8 }}>
-          首批账号由维护人员配置，不开放自助注册。
-          <br />
-          口令在部署时通过 `.env` 中的 `SEED_*` 变量设置，仓库内不提供默认口令。
-        </div>
       </form>
     </div>
   );

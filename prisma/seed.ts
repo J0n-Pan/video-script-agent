@@ -34,6 +34,23 @@ async function main() {
   await upsertUser('editor', pickPassword('SEED_EDITOR_PASSWORD'), '首批编导', 'EDITOR');
   // 第二个账号用于验证多账号共享串行队列且互相不可见（验收 A13）
   await upsertUser('editor2', pickPassword('SEED_EDITOR2_PASSWORD'), '第二编导（联调用）', 'EDITOR');
+
+  /**
+   * 追加编导（多人测试部署用）。
+   * 格式：SEED_EXTRA_EDITORS="用户名:口令:显示名,用户名2:口令2:显示名2"
+   * 未设置时跳过；已存在的同名账号会重置口令并恢复启用。
+   */
+  const extra = process.env.SEED_EXTRA_EDITORS?.trim();
+  if (extra) {
+    for (const entry of extra.split(',')) {
+      const [username, password, displayName] = entry.split(':').map((s) => s?.trim());
+      if (!username || !password || !displayName) {
+        console.warn(`[seed] SEED_EXTRA_EDITORS 条目格式不对（需 用户名:口令:显示名）：${entry}`);
+        continue;
+      }
+      await upsertUser(username, password, displayName, 'EDITOR');
+    }
+  }
   console.log('种子数据完成。');
 }
 

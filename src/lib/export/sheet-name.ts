@@ -1,4 +1,4 @@
-import { MISSING, EXPORT_KIND_LABEL } from '../constants';
+import { MISSING, EXPORT_KIND_LABEL, type ExportKind } from '../constants';
 
 const INVALID = /[:\\/?*[\]]/g;
 
@@ -30,8 +30,8 @@ export function buildSheetNames(titles: Array<{ title?: string | null; seq?: num
   });
 }
 
-/** 文件名带导出类型前缀，便于在下载目录里区分「信息流脚本」与「信息流素材库」 */
-export function buildExportFileName(kind: 'SCRIPT' | 'LIBRARY', now = new Date()): string {
+/** 文件名带导出类型前缀，便于在下载目录里区分三种导出 */
+export function buildExportFileName(kind: ExportKind, now = new Date()): string {
   const p = (n: number) => String(n).padStart(2, '0');
   const stamp = `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}_${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
   return `${EXPORT_KIND_LABEL[kind] ?? '视频脚本'}_${stamp}.xlsx`;

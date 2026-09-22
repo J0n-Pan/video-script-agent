@@ -1,8 +1,9 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { APP_NAME } from '@/lib/constants';
 
 export const metadata: Metadata = {
-  title: '视频号信息流编导脚本编写 Agent',
+  title: APP_NAME,
   description: '把参考视频还原为可复核、可编辑、可供拍摄团队使用的脚本（PRD v1.1 本地部署版）',
 };
 

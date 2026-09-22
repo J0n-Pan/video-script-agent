@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import { readUserArg, resolveMuseTarget, type MuseTarget } from './_muse-target';
+import { prisma } from '../src/lib/db';
 import path from 'node:path';
 import { cfg } from '../src/lib/config';
 import { openMuseBrowser, sessionInfo, waitForAppReady } from '../src/lib/sources/muse-browser';
@@ -46,13 +48,15 @@ function brief(v: unknown, n = 1800): string {
 
 (async () => {
   console.log('\n══ 妙思详情接口重放探针 ══');
-  const info = sessionInfo();
+  const target = await resolveMuseTarget(readUserArg(args));
+  console.log(`  会话归属：${target.displayName}（${target.username}）`);
+  const info = sessionInfo(target.storageStatePath);
   console.log(`  会话  ${info.exists ? `${info.cookies} 条 cookie` : '不存在，需 npm run muse:login'}`);
   console.log(`  模式  ${HEADED ? '有头' : '无头'}\n`);
 
   let browser: Awaited<ReturnType<typeof openMuseBrowser>> | null = null;
   try {
-    browser = await openMuseBrowser({ headless: !HEADED, storageState: info.exists ? cfg.muse.storageState : null });
+    browser = await openMuseBrowser({ headless: !HEADED, storageState: info.exists ? target.storageStatePath : null });
     const page = await browser.context.newPage();
 
     const captured: Array<{ url: string; body: any; postData?: string }> = [];
@@ -333,6 +337,8 @@ function brief(v: unknown, n = 1800): string {
     console.log(`\n── 留档 ──\n  ${outPath}\n`);
   } catch (e) {
     console.log(`\n  失败：${(e as Error).message}\n`);
+    await prisma.$disconnect();
+
     process.exit(1);
   } finally {
     await browser?.close();

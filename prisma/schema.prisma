@@ -24,6 +24,12 @@ model User {
   videos    Video[]
   exports   ExportRecord[]
   sessions  Session[]
+
+  // 个性化创作链路（2026-09-20 新增）
+  ipProfiles    IpProfileRevision[]
+  rewriteJobs   RewriteJob[]
+  avatarJobs    AvatarVideoJob[]
+  editFeedbacks EditorFeedback[]
 }
 
 /// 会话 Session：登录态与后端资源鉴权（PRD 2.1 实现约定）
@@ -109,6 +115,8 @@ model Video {
   revisions   ScriptRevision[]
   classification Classification?
   exportItems ExportItem[]
+  /// 以本视频为参考发起的个性化改写任务（来源可为空：视频删除后任务与成品必须留存）
+  rewriteJobs RewriteJob[]
 
   @@index([ownerId, status])
   @@index([status, seq])
@@ -164,6 +172,8 @@ model ScriptRevision {
   attempt Attempt? @relation(fields: [attemptId], references: [id])
   segments Segment[]
   exportItems ExportItem[]
+  /// 以本版本为参考发起的个性化改写任务
+  rewriteJobsAsSource RewriteJob[]
 
   @@unique([videoId, versionNo])
   @@index([videoId, isCurrent])
@@ -190,6 +200,8 @@ model Segment {
 
   revision    ScriptRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
   screenshots Screenshot[]
+  /// 引用本参考段的生成段（参考版本删除后置空，生成稿本身留存）
+  rewriteSegments RewriteSegment[]
 
   @@index([revisionId, orderIndex])
 }
@@ -237,6 +249,9 @@ model Classification {
 model ExportRecord {
   id        String   @id @default(cuid())
   ownerId   String
+  /// 导出类型（2026-09-20 新增，历史行按 LIBRARY 回填）：
+  /// SCRIPT 信息流脚本 / LIBRARY 信息流素材库 / REWRITE 个性化文案
+  kind      String   @default("LIBRARY")
   status    String   @default("READY") // READY / FAILED
   filePath  String?
   fileName  String
@@ -251,23 +266,33 @@ model ExportRecord {
 model ExportItem {
   id         String @id @default(cuid())
   exportId   String
-  videoId    String
-  revisionId String
+  /// 三个来源引用一律可空 + SetNull：删除来源视频/版本后，导出记录本身留存（A22 的删除策略）
+  videoId    String?
+  /// 脚本导出（SCRIPT / LIBRARY）指向 ScriptRevision；个性化文案导出为空
+  revisionId String?
+  /// 个性化文案导出（REWRITE）指向 RewriteRevision；其余导出为空
+  rewriteRevisionId String?
   orderIndex Int
 
   export   ExportRecord   @relation(fields: [exportId], references: [id], onDelete: Cascade)
-  video    Video          @relation(fields: [videoId], references: [id], onDelete: Cascade)
-  revision ScriptRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+  video    Video?         @relation(fields: [videoId], references: [id], onDelete: SetNull)
+  revision ScriptRevision? @relation(fields: [revisionId], references: [id], onDelete: SetNull)
+  rewriteRevision RewriteRevision? @relation(fields: [rewriteRevisionId], references: [id], onDelete: SetNull)
 
   @@index([exportId])
 }
 
 /// 模型调用用量记录：费用与耗时记录（PRD 11.5）
+/// 2026-09-20 扩展调用归属：视频分析调用挂 Attempt（ownerType=ATTEMPT），
+/// 个性化改写调用挂 RewriteJob（ownerType=REWRITE_JOB）。
+/// 创作调用不能记成一次新的语音或视觉解析，能力类型用 REWRITE 区分。
 model ModelUsage {
   id              String   @id @default(cuid())
-  attemptId       String
+  ownerType       String   @default("ATTEMPT") // ATTEMPT / REWRITE_JOB
+  attemptId       String?
+  rewriteJobId    String?
   callNo          Int
-  capability      String   // ASR / VISION / ORGANIZE
+  capability      String   // ASR / VISION / ORGANIZE / REWRITE
   vendor          String   @default("aliyun-bailian")
   region          String   @default("beijing")
   modelId         String
@@ -287,13 +312,260 @@ model ModelUsage {
   finishedAt      DateTime?
   errorMessage    String?
 
-  attempt Attempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  attempt    Attempt?    @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  rewriteJob RewriteJob? @relation(fields: [rewriteJobId], references: [id], onDelete: Cascade)
 
   @@index([attemptId])
+  @@index([rewriteJobId])
+  @@index([ownerType, capability])
 }
 
 /// 全局递增序号计数器（排队序号由服务端提交成功时分配）
 model Counter {
   name  String @id
   value Int    @default(0)
+}
+
+// ============================================================================
+// 个性化文案 + 数字人视频（2026-09-20 需求迭代 v1.0）
+// 命名与职责对应需求文档 §8。删除策略：来源引用一律可空 + SetNull，
+// 并在 RewriteJob.inputSnapshot 里留来源快照 —— 删除来源视频不得连带清除新稿与成品。
+// ============================================================================
+
+/// 资料包版本 IpProfileRevision：两类资料共用一张表，按 `kind` 判别。
+///
+/// - `IP`：IP 与产品事实资料包（人设、资质、案例、课程权益…），改写稿的**唯一事实来源**；
+/// - `BANNED`：违禁词资料包，改写稿中**绝对不能出现**的词/表达。
+///
+/// 为什么复用同一张表而不是另建一张：两类资料的版本管理逻辑（换文档=新版本、sha256 去重、
+/// 只追加不覆盖、历史版本可重新置为生效）完全相同，另建一张表要把这套逻辑抄一遍，抄漏一处就漂移。
+///
+/// 为什么模型名仍叫 IpProfileRevision：改表名在 `prisma db push` 下是「建新表 + 丢旧表」，
+/// 已有资料包与生成任务的外键会一起丢。名字不准可以靠这段注释兜住，数据丢了兜不住。
+///
+/// 版本化：更新或更换资料文档时新增版本，不覆盖历史；生成任务按版本 ID 锁定输入。
+model IpProfileRevision {
+  id             String   @id @default(cuid())
+  ownerId        String
+  /// 资料包类型：IP = 事实资料包；BANNED = 违禁词资料包。两类各自独立版本链。
+  kind           String   @default("IP")
+  versionNo      Int
+  title          String   @default("")
+  /// 来源文件名与内容哈希：换文档 / 同文档重导入都能判断
+  sourceFileName String?
+  sourceSha256   String?
+  /// 资料原文（抽取后的纯文本存档），便于追溯模型当时看到的资料
+  rawText        String   @default("")
+  /// 结构化资料包（JSON）。形状由 `kind` 决定：
+  /// - IP：sections（personal 人设与经历 / credentials 资质 / method 教学理念与方法演示 /
+  ///   cases 学生案例 / audience 受众问题 / offer 课程与权益 / conditions 适用条件 /
+  ///   styleSamples 风格样例 / boundaries 事实边界与禁止表述 / gaps 待统一字段）
+  ///   + facts 可引用事实条目（带 id，供 RewriteSegment.factRefs 追溯）
+  /// - BANNED：categories 分类名列表 + entries 词条（text / category / note）
+  profileJson    String   @default("{}")
+  status         String   @default("ACTIVE") // ACTIVE / SUPERSEDED
+  note           String   @default("")
+  createdById    String?
+  createdAt      DateTime @default(now())
+
+  owner       User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  rewriteJobs RewriteJob[]
+
+  @@unique([ownerId, kind, versionNo])
+  @@index([ownerId, kind, status])
+}
+
+/// 改写任务 RewriteJob：从一条已分析视频的某个保存版本生成多篇严格结构对应的文案
+model RewriteJob {
+  id                  String   @id @default(cuid())
+  ownerId             String
+  /// 来源引用可空：来源被删除后任务、成品与快照必须留存
+  sourceVideoId       String?
+  sourceRevisionId    String?
+  /// 平台仅影响措辞与既有行动引导的表达，不改变结构
+  platform            String   @default("WECHAT_CHANNELS") // WECHAT_CHANNELS / DOUYIN / XIAOHONGSHU
+  variantCount        Int      @default(3)
+  ipProfileRevisionId String?
+  modelId             String   @default("")
+  promptVersion       String   @default("rewrite-v1")
+  ruleVersion         String   @default("rewrite-v1")
+  /// 输入快照（JSON）：参考版本分段、视频分析（sourceInsight）、资料包版本、平台、规则、数量。
+  /// 必须有快照 —— sourceInsight 等字段不随脚本版本保存，仅引用版本 ID 无法重现当时输入。
+  inputSnapshot       String   @default("{}")
+  /// QUEUED / RUNNING / SUCCEEDED / PARTIAL / FAILED
+  status              String   @default("QUEUED")
+  stage               String?
+  errorCode           String?
+  errorMessage        String?
+  /// 幂等键：同一次点击重复请求返回同一任务
+  clientKey           String?
+  startedAt           DateTime?
+  finishedAt          DateTime?
+  createdAt           DateTime @default(now())
+
+  owner          User               @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  sourceVideo    Video?             @relation(fields: [sourceVideoId], references: [id], onDelete: SetNull)
+  sourceRevision ScriptRevision?    @relation(fields: [sourceRevisionId], references: [id], onDelete: SetNull)
+  ipProfile      IpProfileRevision? @relation(fields: [ipProfileRevisionId], references: [id], onDelete: SetNull)
+  variants       RewriteVariant[]
+  selections     RewriteSelection[]
+  usages         ModelUsage[]
+
+  @@unique([ownerId, clientKey])
+  @@index([ownerId, sourceVideoId])
+  @@index([status])
+}
+
+/// 候选稿 RewriteVariant：一次生成任务产出的一篇文案
+model RewriteVariant {
+  id                String   @id @default(cuid())
+  jobId             String
+  variantNo         Int
+  /// 一行差异说明：本稿与其他版本的表达差异（不得靠重排结构制造差异）
+  diffSummary       String   @default("")
+  /// 当前生效修订（首次生成指向 AI 创建的修订）
+  currentRevisionId String?
+  createdAt         DateTime @default(now())
+
+  job        RewriteJob         @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  revisions  RewriteRevision[]
+  selections RewriteSelection[]
+
+  @@unique([jobId, variantNo])
+}
+
+/// 文案修订 RewriteRevision：AI 首次生成或编导手工保存，均创建新修订，保留旧内容
+model RewriteRevision {
+  id                  String   @id @default(cuid())
+  variantId           String
+  revisionNo          Int
+  createdBy           String   @default("AI") // AI / HUMAN
+  createdById         String?
+  /// 正文快照：各段 copyText 按 orderIndex 拼接（整段辅助存档）
+  transcriptText      String   @default("")
+  charCount           Int      @default(0)
+  /// 预计口播时长（毫秒，估算值；成品实际时长以 GeneratedVideoAsset 为准）
+  estimatedDurationMs Int      @default(0)
+  /// 问题标记（JSON）：STRUCTURE_MISMATCH / TRANSCRIPT_MISMATCH / MISSING_FACT 等
+  problemFlags        String   @default("[]")
+  savedAt             DateTime @default(now())
+
+  variant        RewriteVariant     @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  segments       RewriteSegment[]
+  selections     RewriteSelection[]
+  avatarJobs     AvatarVideoJob[]
+  exportItems    ExportItem[]
+
+  @@unique([variantId, revisionNo])
+  @@index([variantId, savedAt])
+}
+
+/// 生成段 RewriteSegment：与参考段严格一对一（段数、顺序、标签一致）
+model RewriteSegment {
+  id              String   @id @default(cuid())
+  revisionId      String
+  orderIndex      Int
+  /// 一对一对应的参考段；参考版本被删除后置空，生成稿本身留存
+  sourceSegmentId String?
+  /// 沿用现有六类标签口径，不新增「场景」，不改旧标签体系
+  tag             String   @default("")
+  copyText        String   @default("")
+  /// 引用的 IP 资料事实条目 id 列表（JSON）——有助于追溯，但不能单独证明断言真实
+  factRefs        String   @default("[]")
+  problemFlags    String   @default("[]")
+
+  revision      RewriteRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+  sourceSegment Segment?        @relation(fields: [sourceSegmentId], references: [id], onDelete: SetNull)
+
+  @@index([revisionId, orderIndex])
+}
+
+/// 选稿 RewriteSelection：选定某个已保存修订，作为数字人任务的提交依据
+model RewriteSelection {
+  id           String   @id @default(cuid())
+  jobId        String
+  variantId    String
+  revisionId   String
+  selectedById String?
+  createdAt    DateTime @default(now())
+
+  job      RewriteJob      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  variant  RewriteVariant  @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  revision RewriteRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, createdAt])
+}
+
+/// 数字人视频任务 AvatarVideoJob：选定修订 → 鲲之益平台 → 成品
+model AvatarVideoJob {
+  id                String   @id @default(cuid())
+  ownerId           String
+  rewriteRevisionId String?
+  /// 提交文本快照：选定修订的分段正文按序拼接，不含标签、标题、时间码、内部编号
+  textSnapshot      String   @default("")
+  /// 生成参数快照（JSON）：形象、音色、语速、音量、字幕、背景音乐、语言
+  paramsSnapshot    String   @default("{}")
+  /// 幂等键：同一次按钮点击重复请求返回同一任务
+  idempotencyKey    String   @unique
+  /// 唯一业务名称：平台侧不可靠地按「作品列表第一条」判断结果时的核对依据
+  businessName      String   @default("")
+  /// 第三方作品 ID（提交成功后保存）
+  vendorJobId       String?
+  vendorAssetUrl    String?
+  /// QUEUED / NEEDS_LOGIN / SUBMITTING / VENDOR_RUNNING / NEEDS_REVIEW / FETCHING / SUCCEEDED / FAILED
+  status            String   @default("QUEUED")
+  errorCode         String?
+  errorMessage      String?
+  /// 结果待核对的说明（提交结果不明时记录，不自动重复提交）
+  reconcileNote     String   @default("")
+  attemptCount      Int      @default(0)
+  submittedAt       DateTime?
+  finishedAt        DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  owner    User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  revision RewriteRevision? @relation(fields: [rewriteRevisionId], references: [id], onDelete: SetNull)
+  assets   GeneratedVideoAsset[]
+
+  @@index([ownerId, status])
+  @@index([vendorJobId])
+}
+
+/// 成品资产 GeneratedVideoAsset：持久化路径 + 媒体校验值，不仅依赖第三方下载链接
+model GeneratedVideoAsset {
+  id               String   @id @default(cuid())
+  avatarVideoJobId String
+  filePath         String
+  fileName         String
+  durationMs       Int      @default(0)
+  sizeBytes        BigInt   @default(0)
+  sha256           String?
+  width            Int?
+  height           Int?
+  hasAudio         Boolean  @default(true)
+  status           String   @default("READY") // READY / FAILED
+  failReason       String?
+  createdAt        DateTime @default(now())
+
+  job AvatarVideoJob @relation(fields: [avatarVideoJobId], references: [id], onDelete: Cascade)
+
+  @@index([avatarVideoJobId])
+}
+
+/// 编导反馈 EditorFeedback：选择与修改记录留存，原因选填，不做模型评分裁决
+model EditorFeedback {
+  id                String   @id @default(cuid())
+  ownerId           String
+  rewriteJobId      String?
+  rewriteRevisionId String?
+  kind              String   // SELECT / EDIT / REGENERATE / REJECT
+  reason            String   @default("")
+  payload           String   @default("{}")
+  createdAt         DateTime @default(now())
+
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId, createdAt])
+  @@index([rewriteJobId])
 }

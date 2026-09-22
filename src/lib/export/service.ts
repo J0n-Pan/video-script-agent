@@ -3,13 +3,26 @@ import { cfg, ensureDirs } from '../config';
 import { EXPORT_KIND, FORM, NON_EXPORTABLE_STATUSES, REVIEW_STATUS_LABEL, VIDEO_STATUS_LABEL, type ExportKind } from '../constants';
 import { buildWorkbook, type ExportVideoPayload } from './xlsx';
 import { buildScriptWorkbook } from './script-sheet';
+import { buildRewriteWorkbook, type ExportRewritePayload } from './rewrite-sheet';
+import { REWRITE_PLATFORM_LABEL } from '../rewrite/rules';
 import type { MuseInsight } from '../sources/muse-insight';
 
-export type ExportRequestItem = { videoId: string; revisionId?: string | null };
+/**
+ * 导出条目：
+ * - SCRIPT / LIBRARY 用 videoId + revisionId（脚本版本）；
+ * - REWRITE 用 rewriteRevisionId（改写稿修订），此时没有 videoId。
+ */
+export type ExportRequestItem = {
+  videoId?: string | null;
+  revisionId?: string | null;
+  rewriteRevisionId?: string | null;
+};
 
 /** 归一化前端传来的导出类型：非法值一律按「信息流素材库」处理，不静默换类型 */
 export function normalizeExportKind(raw: unknown): ExportKind {
-  return raw === EXPORT_KIND.SCRIPT ? EXPORT_KIND.SCRIPT : EXPORT_KIND.LIBRARY;
+  if (raw === EXPORT_KIND.SCRIPT) return EXPORT_KIND.SCRIPT;
+  if (raw === EXPORT_KIND.REWRITE) return EXPORT_KIND.REWRITE;
+  return EXPORT_KIND.LIBRARY;
 }
 
 export type ExportValidation = {
@@ -22,11 +35,22 @@ export type ExportValidation = {
  * 可导出已完成、部分完成及混剪提示记录；排队中、处理中、失败且无可用结果、已取消的记录不能作为完整脚本导出，
  * 必须逐项说明并要求用户明确移除，禁止静默少导出。
  */
-export async function validateExport(ownerId: string, items: ExportRequestItem[]): Promise<ExportValidation> {
+export async function validateExport(
+  ownerId: string,
+  items: ExportRequestItem[],
+  kind: ExportKind = EXPORT_KIND.LIBRARY,
+): Promise<ExportValidation> {
+  // 改写稿是另一套对象（没有视频脚本版本），校验口径不同
+  if (kind === EXPORT_KIND.REWRITE) return validateRewriteExport(ownerId, items);
+
   const exportable: ExportRequestItem[] = [];
   const blocked: ExportValidation['blocked'] = [];
 
   for (const item of items) {
+    if (!item.videoId) {
+      blocked.push({ videoId: '', title: '', reason: '条目缺少视频 ID' });
+      continue;
+    }
     const video = await prisma.video.findFirst({
       where: { id: item.videoId, ownerId, deletedAt: null },
       include: { revisions: { where: { isCurrent: true } } },
@@ -70,7 +94,9 @@ export async function validateExport(ownerId: string, items: ExportRequestItem[]
 /** 以版本快照生成导出文件；未保存编辑不得混入（调用方须先完成显式保存） */
 export async function createExport(ownerId: string, items: ExportRequestItem[], kind: ExportKind = EXPORT_KIND.LIBRARY) {
   ensureDirs();
-  const { exportable, blocked } = await validateExport(ownerId, items);
+  if (kind === EXPORT_KIND.REWRITE) return createRewriteExport(ownerId, items);
+
+  const { exportable, blocked } = await validateExport(ownerId, items, kind);
   if (blocked.length > 0) {
     return { ok: false as const, blocked };
   }
@@ -137,13 +163,14 @@ export async function createExport(ownerId: string, items: ExportRequestItem[], 
   const record = await prisma.exportRecord.create({
     data: {
       ownerId,
+      kind,
       status: 'READY',
       filePath,
       fileName,
       itemCount: payloads.length,
       items: {
         create: exportable.map((item, i) => ({
-          videoId: item.videoId,
+          videoId: item.videoId!,
           revisionId: item.revisionId!,
           orderIndex: i + 1,
         })),
@@ -151,4 +178,155 @@ export async function createExport(ownerId: string, items: ExportRequestItem[], 
     },
   });
   return { ok: true as const, exportId: record.id, fileName, filePath, itemCount: payloads.length, kind };
+}
+
+// ============================================================================
+// 「信息流文案改写稿」导出（2026-09-20 §9）
+// 独立类型，与 SCRIPT / LIBRARY 完全分开：不改动原有两种导出的任何行为。
+// ============================================================================
+
+/**
+ * 改写稿导出校验：只认**已保存的修订**。
+ * 归属链必须走通 variant.job.ownerId —— 只验「修订 ID 存在」等于把别人的稿件也放行（A19）。
+ */
+export async function validateRewriteExport(ownerId: string, items: ExportRequestItem[]): Promise<ExportValidation> {
+  const exportable: ExportRequestItem[] = [];
+  const blocked: ExportValidation['blocked'] = [];
+
+  for (const item of items) {
+    if (!item.rewriteRevisionId) {
+      blocked.push({ videoId: '', title: '', reason: '条目缺少改写稿修订 ID' });
+      continue;
+    }
+    const rev = await prisma.rewriteRevision.findFirst({
+      where: { id: item.rewriteRevisionId, variant: { job: { ownerId } } },
+      include: { variant: { include: { job: { select: { id: true } } } }, segments: { orderBy: { orderIndex: 'asc' } } },
+    });
+    if (!rev) {
+      blocked.push({ videoId: '', title: '', reason: '改写稿不存在或无权访问' });
+      continue;
+    }
+    if (rev.segments.length === 0) {
+      blocked.push({ videoId: '', title: '', reason: '该改写稿没有正文（未生成成功或已清空），不能导出' });
+      continue;
+    }
+    exportable.push({ rewriteRevisionId: rev.id });
+  }
+
+  return { exportable, blocked };
+}
+
+function parseJsonObject(raw: string | null | undefined): Record<string, any> {
+  try {
+    const o = JSON.parse(raw || '{}');
+    return o && typeof o === 'object' ? o : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 生成改写稿导出文件。
+ * 一个创作任务一个工作表，选中的多个版本排在**同一张表**里（「稿件版本」列因此才有意义）。
+ */
+async function createRewriteExport(ownerId: string, items: ExportRequestItem[]) {
+  const { exportable, blocked } = await validateRewriteExport(ownerId, items);
+  if (blocked.length > 0) return { ok: false as const, blocked };
+  if (exportable.length === 0) {
+    return { ok: false as const, blocked: [{ videoId: '', title: '', reason: '没有可导出的改写稿' }] };
+  }
+
+  const groups = new Map<string, ExportRewritePayload>();
+  const usedRevisions: string[] = [];
+
+  for (const item of exportable) {
+    const rev = await prisma.rewriteRevision.findFirst({
+      where: { id: item.rewriteRevisionId!, variant: { job: { ownerId } } },
+      include: {
+        variant: {
+          include: {
+            job: {
+              include: {
+                sourceVideo: { select: { title: true, sourceTitle: true } },
+                ipProfile: { select: { title: true, versionNo: true } },
+                selections: { orderBy: { createdAt: 'desc' }, take: 1 },
+              },
+            },
+          },
+        },
+        segments: { orderBy: { orderIndex: 'asc' } },
+      },
+    });
+    if (!rev) continue;
+    usedRevisions.push(rev.id);
+
+    const job = rev.variant.job;
+    const snap = parseJsonObject(job.inputSnapshot);
+    const src = job.sourceVideo;
+
+    let g = groups.get(job.id);
+    if (!g) {
+      const refCount = Array.isArray(snap.refSegments) ? snap.refSegments.length : 0;
+      g = {
+        jobId: job.id,
+        jobTitle: (src?.title ?? '').trim() || (src?.sourceTitle ?? '').trim() || '改写稿（来源视频已删除）',
+        // 来源删除后仍能导出已生成的稿件，但抬头要说清来源已不可用（A22）
+        sourceTitle: src
+          ? (src.title ?? '').trim() || (src.sourceTitle ?? '').trim() || '未提供'
+          : '（来源视频已删除，稿件本身仍保留）',
+        sourceRevisionLabel: `v${snap.sourceRevisionVersionNo ?? '?'}（${refCount} 段）`,
+        platformLabel: REWRITE_PLATFORM_LABEL(job.platform),
+        ipProfileLabel: job.ipProfile ? `《${job.ipProfile.title}》 v${job.ipProfile.versionNo}` : '（资料包版本已不存在）',
+        modelId: job.modelId,
+        generatedAt: job.finishedAt ?? job.createdAt,
+        selectionLabel: '本次导出未包含已选定稿件',
+        variants: [],
+      };
+      groups.set(job.id, g);
+    }
+
+    // 选定标记：只看最新一次选定是否指向本条修订
+    const sel = job.selections[0];
+    if (sel && sel.revisionId === rev.id) {
+      g.selectionLabel = `已选定：第 ${rev.variant.variantNo} 版（修订 ${rev.revisionNo}）`;
+    }
+
+    g.variants.push({
+      variantNo: rev.variant.variantNo,
+      revisionNo: rev.revisionNo,
+      createdBy: rev.createdBy,
+      diffSummary: rev.variant.diffSummary,
+      charCount: rev.charCount,
+      estimatedDurationMs: rev.estimatedDurationMs,
+      segments: rev.segments.map((s) => ({ orderIndex: s.orderIndex, tag: s.tag, copyText: s.copyText })),
+    });
+  }
+
+  const payloads = [...groups.values()];
+  if (payloads.length === 0) {
+    return { ok: false as const, blocked: [{ videoId: '', title: '', reason: '没有可导出的改写稿' }] };
+  }
+
+  const { filePath, fileName } = await buildRewriteWorkbook(payloads, cfg.exportDir);
+  const record = await prisma.exportRecord.create({
+    data: {
+      ownerId,
+      kind: EXPORT_KIND.REWRITE,
+      status: 'READY',
+      filePath,
+      fileName,
+      itemCount: usedRevisions.length,
+      items: {
+        create: usedRevisions.map((rid, i) => ({ rewriteRevisionId: rid, orderIndex: i + 1 })),
+      },
+    },
+  });
+  return {
+    ok: true as const,
+    exportId: record.id,
+    fileName,
+    filePath,
+    itemCount: usedRevisions.length,
+    kind: EXPORT_KIND.REWRITE,
+  };
 }

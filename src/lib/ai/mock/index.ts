@@ -13,6 +13,11 @@ import type {
   OrganizeInput,
   OrganizeOutput,
   OrganizeSegmentInput,
+  RewriteAdapter,
+  RewriteDraft,
+  RewriteInput,
+  RewriteOutput,
+  RewriteRefSegment,
   VisionAdapter,
   VisionFrameResult,
   VisionInput,
@@ -321,4 +326,65 @@ function nearestFrame(frames: VisionFrameResult[], t: number): VisionFrameResult
     }
   }
   return best;
+}
+
+/**
+ * 改写 Mock：严格按参考段结构产出多篇占位文案。
+ * 用途是让「生成 → 比较 → 编辑 → 选稿 → 导出 → 数字人（Mock 适配器）」全链路可验收；
+ * 文案本身没有业务价值，每稿都带 MOCK_REWRITE 问题项，避免被误当作真实生成结果。
+ */
+export class MockRewriteAdapter implements RewriteAdapter {
+  readonly modelId = 'mock-rewrite';
+
+  async rewrite(input: RewriteInput): Promise<RewriteOutput> {
+    const count = Math.max(1, Math.min(input.variantCount, 10));
+    const styles = ['稳健叙述', '先给结论再解释', '用提问开场', '以案例切入', '强调对比'];
+    /**
+     * 测试钩子（MOCK_BANNED_HIT=1，默认关闭）：让第 1 版第 1 段故意写进一个**真实配置的**禁用词，
+     * 用来验收「生成后扫描命中 → BANNED_WORD_HIT 问题项」这条链路。
+     *
+     * 取词是从 `input.bannedWordsText` 里读的（而不是写死一个词），
+     * 这样测的是"配置的违禁词表确实进了提示词、也确实被扫到"，而不是自说自话。
+     */
+    const injectWord = process.env.MOCK_BANNED_HIT === '1' ? firstBannedWord(input.bannedWordsText) : '';
+    const drafts: RewriteDraft[] = [];
+    for (let v = 1; v <= count; v += 1) {
+      drafts.push({
+        variantNo: v,
+        diffSummary: `MOCK 第 ${v} 版：以「${styles[(v - 1) % styles.length]}」的方式重述同一结构`,
+        segments: input.refSegments.map((ref, i) => ({
+          orderIndex: ref.orderIndex,
+          sourceSegmentId: ref.id,
+          tag: ref.tag,
+          copyText: injectWord && v === 1 && i === 0 ? `${mockRewriteText(ref, v)}${injectWord}` : mockRewriteText(ref, v),
+          factRefs: [],
+        })),
+      });
+    }
+    return {
+      drafts,
+      issues: [
+        {
+          code: 'MOCK_REWRITE',
+          message: '改写走 Mock 桩实现：文案为占位内容，不是真实生成结果，不可用于投放。',
+          severity: 'warn' as const,
+        },
+      ],
+      usage: {},
+    };
+  }
+}
+
+/** 确定性占位文案：保留参考段的字数规模，同时保证不同版本正文不同（否则会被判为无效重复） */
+function mockRewriteText(ref: RewriteRefSegment, v: number): string {
+  const base = (ref.copyText ?? '').replace(/\s+/g, ' ').trim();
+  const head = `【MOCK 第${v}版·${ref.tag}】`;
+  const tail = `（占位改写，参考段共 ${base.length} 字）`;
+  return base ? head + base + tail : head + '参考段无原文，按结构占位' + tail;
+}
+
+/** 从渲染好的违禁词文本里取第一个词条（形如 `- 最好`）；取不到返回空串 */
+function firstBannedWord(bannedWordsText: string): string {
+  const m = /^[-•]\s*(.+)$/m.exec(bannedWordsText ?? '');
+  return m ? m[1].trim() : '';
 }

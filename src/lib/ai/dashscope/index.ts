@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { cfg } from '../../config';
 import { MISSING, TAG, TAG_ORDER, normalizeTag, unclearAt } from '../../constants';
+import { buildRewriteUserMessage } from '../../rewrite/rules';
 import type {
   AudioRecognitionAdapter,
   AudioRecognitionInput,
@@ -15,6 +16,11 @@ import type {
   OrganizeInput,
   OrganizeOutput,
   OrganizeSegmentInput,
+  RewriteAdapter,
+  RewriteDraft,
+  RewriteDraftSegment,
+  RewriteInput,
+  RewriteOutput,
   VisionAdapter,
   VisionFrameResult,
   VisionInput,
@@ -432,6 +438,180 @@ export class DashscopeOrganizeAdapter implements OrganizeAdapter {
       usage: { ...readUsage(body?.usage), vendorRequestId: requestIdOf(body) },
     };
   }
+}
+
+/**
+ * 个性化文案改写（2026-09-20 需求迭代 §7 之外的创作链路）：
+ * 把参考视频的分段文案改写成本方口播文案，段数/顺序/标签与参考一一对应。
+ *
+ * 与 DashscopeOrganizeAdapter 的关键区别（勿混用）：
+ * - 整理是**忠实转写**，文案由程序按原始片段回填、模型不改字；
+ * - 改写是**创作**，文案就该由模型写，但结构由程序裁决（validateDrafts）。
+ * 因此两者不能共用提示词，也不能共用保真校验。
+ */
+export class DashscopeRewriteAdapter implements RewriteAdapter {
+  readonly modelId = cfg.rewrite.model;
+
+  async rewrite(input: RewriteInput): Promise<RewriteOutput> {
+    // 允许按次覆盖模型（横向实测用）；默认走 REWRITE_MODEL
+    const model = input.model ?? cfg.rewrite.model;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), cfg.rewrite.timeoutMs);
+    let body: any;
+    try {
+      body = await jsonFetch(`${host()}/compatible-mode/v1/chat/completions`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json' },
+        signal: ctrl.signal,
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: input.rules },
+            { role: 'user', content: buildRewriteUserMessage(input) },
+          ],
+          response_format: { type: 'json_object' },
+          // 与视觉/整理同理：Qwen3.8 系列默认走思考模式，不显式关闭会大幅抬高输出 tokens 与耗时。
+          enable_thinking: false,
+          temperature: cfg.rewrite.temperature,
+          top_p: cfg.rewrite.topP,
+          max_tokens: cfg.rewrite.maxOutputTokens,
+        }),
+      });
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        throw new Error(
+          `改写调用超时（${cfg.rewrite.timeoutMs}ms）。可调大 REWRITE_TIMEOUT_MS，或减少 REWRITE_VARIANT_COUNT。`,
+        );
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const txt: string = body?.choices?.[0]?.message?.content ?? '{}';
+    const parsed = safeJson(txt);
+    dumpRaw('rewrite', { model, content: txt, usage: body?.usage });
+
+    /** 跨模型族字段漂移同样存在：drafts / versions / variants 都见过，逐层兼容 */
+    const rawDrafts: any[] = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.drafts)
+        ? parsed.drafts
+        : Array.isArray(parsed?.versions)
+          ? parsed.versions
+          : Array.isArray(parsed?.variants)
+            ? parsed.variants
+            : [];
+
+    const drafts: RewriteDraft[] = rawDrafts.map((d: any, i: number) => {
+      const rawSegs: any[] = Array.isArray(d?.segments)
+        ? d.segments
+        : Array.isArray(d?.segs)
+          ? d.segs
+          : Array.isArray(d?.paragraphs)
+            ? d.paragraphs
+            : [];
+      const segments: RewriteDraftSegment[] = rawSegs.map((s: any) => ({
+        orderIndex: Math.round(Number(s?.orderIndex ?? s?.order_index ?? s?.index ?? 0)),
+        sourceSegmentId:
+          s?.sourceSegmentId ?? s?.source_segment_id ?? s?.sourceId ?? s?.refSegmentId ?? null,
+        tag: String(s?.tag ?? s?.['标签'] ?? ''),
+        copyText: String(s?.copyText ?? s?.copy_text ?? s?.text ?? s?.['正文'] ?? ''),
+        factRefs: Array.isArray(s?.factRefs)
+          ? s.factRefs.map(String)
+          : Array.isArray(s?.fact_refs)
+            ? s.fact_refs.map(String)
+            : [],
+      }));
+      const blockedReason =
+        String(d?.blockedReason ?? d?.blocked_reason ?? '').trim() || s0(d) || undefined;
+      return {
+        variantNo: Math.round(Number(d?.variantNo ?? d?.variant_no ?? d?.no ?? i + 1)),
+        diffSummary: String(d?.diffSummary ?? d?.diff_summary ?? d?.['差异说明'] ?? ''),
+        segments,
+        blockedReason,
+      };
+    });
+
+    const issues: RewriteOutput['issues'] = [];
+    if (drafts.length === 0) {
+      issues.push({
+        code: 'REWRITE_EMPTY',
+        message:
+          '改写模型未返回任何候选稿（drafts / versions / variants 均不存在或为空）。' +
+          `实际顶层键为 [${Object.keys(parsed ?? {}).join(', ') || '(空)'}]，请核对模型返回结构与字段映射。`,
+        severity: 'error',
+      });
+    }
+
+    return {
+      drafts,
+      issues,
+      usage: { ...readUsage(body?.usage), vendorRequestId: requestIdOf(body) },
+    };
+  }
+}
+
+/** 模型拒绝生成时的原因可能写在多个键上 */
+function s0(d: any): string | undefined {
+  for (const k of ['blocked', 'blocked_reason', 'reason', 'error']) {
+    if (typeof d?.[k] === 'string' && d[k].trim()) return d[k].trim();
+  }
+  return undefined;
+}
+
+/**
+ * 通用「要 JSON 的对话调用」：供不走三类适配器的场景复用
+ * （IP 资料包结构化、模型横向实测脚本）。
+ * 统一在这里处理鉴权、enable_thinking=false、超时与用量字段，
+ * 避免每个调用方各写一份而把「用量字段名」或「思考模式」漏掉。
+ */
+export async function chatJson(opts: {
+  model: string;
+  user: string;
+  system?: string;
+  maxTokens?: number;
+  temperature?: number;
+  timeoutMs?: number;
+}): Promise<{
+  text: string;
+  parsed: any;
+  inputTokens?: number;
+  outputTokens?: number;
+  thinkingTokens?: number;
+  usageMissing: boolean;
+  vendorRequestId?: string;
+}> {
+  const ctrl = new AbortController();
+  const timeoutMs = opts.timeoutMs ?? 300_000;
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let body: any;
+  try {
+    body = await jsonFetch(`${host()}/compatible-mode/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json' },
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        model: opts.model,
+        messages: [
+          ...(opts.system ? [{ role: 'system', content: opts.system }] : []),
+          { role: 'user', content: opts.user },
+        ],
+        response_format: { type: 'json_object' },
+        enable_thinking: false,
+        ...(opts.temperature === undefined ? {} : { temperature: opts.temperature }),
+        ...(opts.maxTokens === undefined ? {} : { max_tokens: opts.maxTokens }),
+      }),
+    });
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw new Error(`模型调用超时（${timeoutMs}ms）：model=${opts.model}`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+  const text: string = body?.choices?.[0]?.message?.content ?? '{}';
+  const u = readUsage(body?.usage);
+  return { text, parsed: safeJson(text), ...u, vendorRequestId: requestIdOf(body) };
 }
 
 /**

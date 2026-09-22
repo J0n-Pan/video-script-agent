@@ -230,6 +230,46 @@ export function looksLoggedIn(text: string): boolean {
 }
 
 /**
+ * 已登录的**权威标识**（实测 2026-09-20）。
+ *
+ * 为什么不能只靠文字：`LOGGED_IN_RE`（退出登录 / 切换账号…）只在账号菜单**展开后**才进 DOM，
+ * 已登录的首页上根本读不到；而未登录时存在的「登录/注册」入口在登录后会消失。
+ * 两者都不命中，会得出「既无登录引导也无已登录标识」的结论 ——
+ * 实测确实把一个**有效的会话**判成了 UNKNOWN。
+ *
+ * 实测已登录首页存在稳定节点：
+ *   <div class="ms-global-feature-user ms-global-feature-user--logged-in">
+ *     <div class="ms-global-feature-user__avatar-trigger">
+ *       <img class="mx-media__image" src="https://thirdwx.qlogo.cn/...">   ← 微信头像
+ *
+ * 这个判据同时解决另一个隐患：首页会挂运营公告长文（实测 2736 字），
+ * 而 `LOGIN_WALL_RE` 含「登录后」这类词，公告万一命中就会**误判为已失效**、
+ * 进而误拦本来能成功的抓取。有了 DOM 权威标识，这类误判可以直接排除。
+ *
+ * 必须以字符串传给 page.evaluate（本项目用 tsx 运行，函数体会被注入 __name，
+ * 在页面上下文里报 `__name is not defined`）。
+ */
+const LOGGED_IN_DOM_PROBE = `(() => {
+  try {
+    if (document.querySelector('.ms-global-feature-user--logged-in')) return true;
+    if (document.querySelector('[class*="feature-user--logged-in"]')) return true;
+    var avatar = document.querySelector('.ms-global-feature-user__avatar-trigger img, img.mx-media__image[src*="qlogo.cn"]');
+    return Boolean(avatar);
+  } catch (e) {
+    return false;
+  }
+})()`;
+
+/** 页面级已登录判定：拿不到 DOM 时返回 false，交给文字判据兜底，不武断 */
+export async function detectLoggedInDom(page: any): Promise<boolean> {
+  try {
+    return (await page.evaluate(LOGGED_IN_DOM_PROBE)) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 等待单页应用渲染完成再读页面文字。
  *
  * 必要性：妙思是 hash 路由 SPA，`domcontentloaded` 时 body 尚无内容，
@@ -253,9 +293,15 @@ export async function waitForAppReady(page: any, timeoutMs = 15_000): Promise<vo
   }
 }
 
-/** 会话文件信息（不打印 cookie 值，PRD 11.2） */
-export function sessionInfo() {
-  const p = cfg.muse.storageState;
+/**
+ * 会话文件信息（不打印 cookie 值，PRD 11.2）。
+ *
+ * 2026-09-22 起**按路径**取值而不是读全局配置：会话已改为一人一份
+ * （`data/muse-session/users/<userId>/state.json`），本函数保持「只认路径、
+ * 不认识用户」的定位，user→路径的映射由 muse-session-paths / muse-health 负责。
+ */
+export function sessionInfo(statePath: string) {
+  const p = statePath;
   if (!fs.existsSync(p)) return { exists: false as const, path: p, mtime: null as Date | null, cookies: 0 };
   try {
     const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
@@ -699,7 +745,10 @@ export async function inspectMusePage(opts: {
   }
 
   const bodySnippet: string = await page.evaluate(() => document.body?.innerText ?? '').catch(() => '');
-  const loginWall = looksLikeLoginWall(bodySnippet);
+  // DOM 权威标识优先：已登录时直接排除登录墙，
+  // 避免运营公告长文里出现「登录后」之类的词把有效会话误判成失效
+  const loggedInDom = await detectLoggedInDom(page);
+  const loginWall = loggedInDom ? false : looksLikeLoginWall(bodySnippet);
 
   let best: MediaCandidate | null = null;
   // 已判定为登录墙时不再空等媒体地址：没登录看不到素材，等下去只是白耗时间

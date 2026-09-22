@@ -2,24 +2,30 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { cachePathFor, safeExt, baseFileName, fileSize } from '../storage';
 import { cfg } from '../config';
-import type { SourceAdapter, SourceFetchResult } from './types';
+import type { SourceAdapter, SourceContext, SourceFetchResult } from './types';
 
 /**
  * 本地上传来源：文件先完整上传保存后才入队（PRD 6.1）。
  * 这里的「获取」即将已完整落盘的暂存文件复制为主机缓存副本，后续解析与播放都使用该副本。
+ *
+ * 与妙思来源不同，本地来源**不需要任何会话**，因此 ctx（归属人）进来只为了让两个适配器
+ * 的实现签名一致 —— 故意显式列出来而不是省略，避免以后有人以为「本地也用妙思会话」。
  */
 export class LocalSourceAdapter implements SourceAdapter {
   readonly kind = 'LOCAL' as const;
 
-  async checkAvailability() {
+  async checkAvailability(_ctx: SourceContext) {
     return { ok: true as const };
   }
 
-  async fetch(input: {
-    videoId: string;
-    stagedPath?: string | null;
-    fileName?: string | null;
-  }): Promise<SourceFetchResult> {
+  async fetch(
+    input: {
+      videoId: string;
+      stagedPath?: string | null;
+      fileName?: string | null;
+    },
+    _ctx: SourceContext,
+  ): Promise<SourceFetchResult> {
     const staged = input.stagedPath;
     if (!staged || !fs.existsSync(staged)) {
       return {

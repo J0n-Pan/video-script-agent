@@ -27,6 +27,8 @@ export default function NewTaskClient() {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [error, setError] = useState('');
+  const [pasteText, setPasteText] = useState('');
+  const [pasteHint, setPasteHint] = useState('');
   // 同一次提交的幂等标识：重复点击不创建重复任务；提交成功后重新生成，主动再次提交可新建
   const clientKey = useRef<string>(crypto.randomUUID());
 
@@ -45,14 +47,41 @@ export default function NewTaskClient() {
     });
   }
 
-  /** 整段粘贴腾讯链接：一行一条，来源入口相同不等于视频内容不同 */
-  function pasteLinks(text: string) {
-    const links = text
+  /**
+   * 批量粘贴素材链接。
+   *
+   * 2026-09-22 修复（实测报告见下）：原实现只在剪贴板内容**含换行**时才 preventDefault 并处理，
+   * 于是「复制一条链接 → 粘贴」这个最自然的用法落在坏分支上 —— 文本落进**非受控** textarea，
+   * 既不成行也不清空，还会和下一次粘贴拼在一起（实测残留 `?a=1&id=https://…`）。
+   *
+   * 现在的口径：不管几行都接管并清空；补上 Enter 提交与「追加」按钮；
+   * 不合法的行**留在提示里**而不是静默丢弃（静默丢弃正是"以为功能坏了"的来源）。
+   */
+  function appendLinks(raw: string): void {
+    const items = raw
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean);
-    if (links.length === 0) return;
-    setRows((rs) => [...rs, ...links.map((l) => ({ ...newRow('TENCENT_MUSE'), linkText: l }))]);
+    if (items.length === 0) return;
+    const ok = items.filter((s) => /^https?:\/\//i.test(s));
+    const bad = items.filter((s) => !/^https?:\/\//i.test(s));
+    if (ok.length > 0) {
+      setRows((rs) => [...rs, ...ok.map((l) => ({ ...newRow('TENCENT_MUSE'), linkText: l }))]);
+    }
+    setPasteHint(
+      bad.length === 0
+        ? ''
+        : `已追加 ${ok.length} 条链接。以下 ${bad.length} 行不是链接（需以 http:// 或 https:// 开头），未追加：` +
+            bad.map((s) => (s.length > 40 ? `${s.slice(0, 40)}…` : s)).join(' ｜ '),
+    );
+  }
+
+  /** 把输入框里的内容（含刚粘贴进来的）一次性追加成链接行，然后清空 */
+  function flushPasteBox(pasted = ''): void {
+    const merged = [pasteText.trim(), pasted.trim()].filter(Boolean).join('\n');
+    if (!merged) return;
+    appendLinks(merged);
+    setPasteText('');
   }
 
   async function submit() {
@@ -135,27 +164,35 @@ export default function NewTaskClient() {
     <>
       <div className="card">
         <h2>批量清单</h2>
-        <div className="mute2" style={{ marginBottom: 12 }}>
-          每行是一条视频，可在提交前移除和调整顺序。标题、来源链接、本地原文件路径均为选填；缺失会显示「未提供」。
-          浏览器无法自动获取本地文件的绝对路径，如需要请手工填写。
-        </div>
 
         <div className="row" style={{ marginBottom: 12 }}>
           <button onClick={() => setRows((rs) => [...rs, newRow('LOCAL')])}>+ 添加本地视频行</button>
           <button onClick={() => setRows((rs) => [...rs, newRow('TENCENT_MUSE')])}>+ 添加腾讯素材链接行</button>
           <span className="grow" />
           <textarea
-            placeholder="批量粘贴腾讯妙思单条素材链接，每行一条，粘贴后自动追加为链接行"
-            style={{ maxWidth: 420, minHeight: 38 }}
+            value={pasteText}
+            onChange={(e) => setPasteText(e.target.value)}
             onPaste={(e) => {
-              const t = e.clipboardData.getData('text');
-              if (t.includes('\n')) {
+              // 一律接管：单行也直接成行，不让文本留在框里
+              e.preventDefault();
+              flushPasteBox(e.clipboardData.getData('text'));
+            }}
+            onKeyDown={(e) => {
+              // Enter 直接追加；Shift+Enter 保留换行，便于一次贴多条再回车
+              if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                pasteLinks(t);
+                flushPasteBox();
               }
             }}
+            placeholder="粘贴腾讯妙思素材链接，一行一条（单条也可以，粘贴即追加）"
+            style={{ maxWidth: 420, minHeight: 38 }}
           />
+          <button className="small" onClick={() => flushPasteBox()} disabled={!pasteText.trim()}>
+            追加
+          </button>
         </div>
+
+        {pasteHint && <div className="banner warn">{pasteHint}</div>}
 
         <table className="grid">
           <thead>

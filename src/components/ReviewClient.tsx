@@ -794,6 +794,10 @@ export default function ReviewClient({ videoId }: { videoId: string }) {
             <div className="row" style={{ marginBottom: 10 }}>
               <h2 style={{ margin: 0 }}>脚本分段与标签</h2>
               <span className="spacer" style={{ flex: 1 }} />
+              {/* 改写基于**已保存**的分段：未保存的编辑不会被拿去生成，所以这里只跳转不做隐式保存 */}
+              <button className="small" onClick={() => router.push(`/tasks/${videoId}/rewrite`)}>
+                生成改写文案
+              </button>
               <button className="small" onClick={addRow}>
                 + 增加段落
               </button>

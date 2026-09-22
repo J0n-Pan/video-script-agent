@@ -2,26 +2,33 @@ import { requireUser, HttpError } from '@/lib/auth';
 import { handleError, ok, readJson } from '@/lib/api';
 import { prisma } from '@/lib/db';
 import { createExport, normalizeExportKind, validateExport, type ExportRequestItem } from '@/lib/export/service';
-import { EXPORT_KIND_LABEL } from '@/lib/constants';
+import { EXPORT_KIND, EXPORT_KIND_LABEL } from '@/lib/constants';
 
 export const dynamic = 'force-dynamic';
 
 /**
  * 导出确认页：
  * - confirm=false：只校验，逐项说明不可导出原因，禁止静默少导出；
- * - confirm=true ：按 kind 生成文件（SCRIPT 信息流脚本 / LIBRARY 信息流素材库）。
+ * - confirm=true ：按 kind 生成文件（SCRIPT 信息流脚本 / LIBRARY 信息流素材库 / REWRITE 信息流文案改写稿）。
  * 两种响应以 stage 区分（VALIDATE / BLOCKED / DONE），前端必须按 stage 处理。
+ *
+ * 三种导出共用同一入口，但**条目字段不同**：脚本导出认 videoId，改写稿导出认 rewriteRevisionId。
+ * 所以过滤条件必须按 kind 分支，不能统一按 videoId 过滤（否则改写稿会被全部过滤成空）。
  */
 export async function POST(req: Request) {
   try {
     const user = await requireUser();
     const body = await readJson<{ items: ExportRequestItem[]; confirm?: boolean; kind?: string }>(req);
-    const items = (body.items ?? []).filter((i) => i?.videoId);
-    if (items.length === 0) throw new HttpError(400, '未选择任何视频');
     const kind = normalizeExportKind(body.kind);
+    const raw = body.items ?? [];
+    const items =
+      kind === EXPORT_KIND.REWRITE
+        ? raw.filter((i) => i?.rewriteRevisionId)
+        : raw.filter((i) => i?.videoId);
+    if (items.length === 0) throw new HttpError(400, '未选择任何可导出的内容');
 
     if (!body.confirm) {
-      const v = await validateExport(user.id, items);
+      const v = await validateExport(user.id, items, kind);
       return ok({ stage: 'VALIDATE', kind, kindLabel: EXPORT_KIND_LABEL[kind], exportable: v.exportable.length, blocked: v.blocked });
     }
     const r = await createExport(user.id, items, kind);
@@ -52,6 +59,8 @@ export async function GET(req: Request) {
     return ok({
       rows: list.map((e) => ({
         id: e.id,
+        kind: e.kind,
+        kindLabel: EXPORT_KIND_LABEL[e.kind] ?? e.kind,
         fileName: e.fileName,
         itemCount: e.itemCount,
         status: e.status,

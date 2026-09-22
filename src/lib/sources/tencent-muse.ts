@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { cfg } from '../config';
+import { fmtLocal } from '../datetime';
 import { cachePathFor, safeExt, baseFileName, fileSize } from '../storage';
 import { probeMedia } from '../ffmpeg';
 import {
@@ -16,7 +17,9 @@ import {
   type MediaCandidate,
 } from './muse-browser';
 import { attachMuseHarvest, fetchMuseInsight, type MuseHarvest, type MuseInsight } from './muse-insight';
-import type { SourceAdapter, SourceFetchResult } from './types';
+import { markFromFetch, needsAttention, readHealth } from './muse-health';
+import { museStatePath } from './muse-session-paths';
+import type { SourceAdapter, SourceContext, SourceFetchResult } from './types';
 
 /**
  * 逐个试下载的候选上限。候选按证据分降序，真正能用的通常在第 1~2 个；
@@ -40,7 +43,8 @@ const MAX_CANDIDATE_TRIES = 4;
 export class TencentMuseSourceAdapter implements SourceAdapter {
   readonly kind = 'TENCENT_MUSE' as const;
 
-  async checkAvailability(): Promise<{ ok: true } | Extract<SourceFetchResult, { ok: false }>> {
+  async checkAvailability(ctx: SourceContext): Promise<{ ok: true } | Extract<SourceFetchResult, { ok: false }>> {
+    const statePath = museStatePath(ctx.ownerId);
     if (!cfg.muse.fetchEnabled) {
       return {
         ok: false,
@@ -51,12 +55,13 @@ export class TencentMuseSourceAdapter implements SourceAdapter {
         recovery: 'SUPPLEMENT',
       };
     }
-    if (!fs.existsSync(cfg.muse.storageState)) {
+    if (!fs.existsSync(statePath)) {
       return {
         ok: false,
         code: 'SESSION_MISSING',
         message:
-          '未找到腾讯妙思登录会话（data/muse-session/state.json）。请执行 npm run muse:login 扫码登录一次，或直接本地补传视频。',
+          '你还没有登录腾讯妙思（本任务归属人没有会话文件）。请在工作台右上方的提示栏点击「重新扫码登录」，' +
+          '或直接本地补传视频。',
         recovery: 'RELOGIN',
       };
     }
@@ -69,10 +74,28 @@ export class TencentMuseSourceAdapter implements SourceAdapter {
         recovery: 'SUPPLEMENT',
       };
     }
+    // 登录态「已知失效」时直接拒绝，不再白开一次浏览器（09-20 故障：跑到 SAVE 阶段才失败，
+    // 3 次尝试耗掉约 14 分钟）。结论来自 worker 的主动探测或上一次抓取的免费信号；
+    // 状态未知（UNKNOWN，含从未检测）时不阻拦，照常尝试。
+    const health = readHealth(ctx.ownerId);
+    if (needsAttention(health)) {
+      const checked = fmtLocal(health.checkedAt) || '从未检测';
+      return {
+        ok: false,
+        code: health.status === 'MISSING' ? 'SESSION_MISSING' : 'SESSION_EXPIRED',
+        message:
+          `${health.message}（判定时间：${checked}）` +
+          '请在工作台右上方的提示栏点击「重新扫码登录」，或对单条任务使用本地补传。',
+        recovery: 'RELOGIN',
+      };
+    }
     return { ok: true };
   }
 
-  async fetch(input: { videoId: string; url?: string | null }): Promise<SourceFetchResult> {
+  async fetch(
+    input: { videoId: string; url?: string | null },
+    ctx: SourceContext,
+  ): Promise<SourceFetchResult> {
     const url = (input.url ?? '').trim();
     if (!url) {
       return { ok: false, code: 'INVALID_URL', message: '未提供腾讯妙思链接', recovery: 'FIX_INPUT' };
@@ -102,7 +125,7 @@ export class TencentMuseSourceAdapter implements SourceAdapter {
       };
     }
 
-    const avail = await this.checkAvailability();
+    const avail = await this.checkAvailability(ctx);
     if (!avail.ok) return avail;
 
     const downloaded: any[] = [];
@@ -110,7 +133,8 @@ export class TencentMuseSourceAdapter implements SourceAdapter {
     let browser: Awaited<ReturnType<typeof openMuseBrowser>> | null = null;
 
     try {
-      browser = await openMuseBrowser({ headless: cfg.muse.headless });
+      // 用**任务归属人**自己的会话开浏览器：会话已改为一人一份
+      browser = await openMuseBrowser({ headless: cfg.muse.headless, storageState: museStatePath(ctx.ownerId) });
       const page = await browser.context.newPage();
       // 有些素材页会自行触发下载，先接住，避免漏掉
       page.on('download', (d: any) => downloaded.push(d));
@@ -125,11 +149,14 @@ export class TencentMuseSourceAdapter implements SourceAdapter {
       });
 
       if (insp.loginWall) {
+        // L0 免费信号：既然已经确凿看到登录墙，就把结论记账，
+        // 让工作台横幅立刻显示「登录态已失效」，不必等下一次定时/打开探测。
+        markFromFetch(ctx.ownerId, 'SESSION_EXPIRED');
         return {
           ok: false,
           code: 'SESSION_EXPIRED',
           message:
-            '腾讯妙思登录态已失效（页面弹出登录框）。请重新执行 npm run muse:login 扫码登录，或本地补传视频。' +
+            '腾讯妙思登录态已失效（页面弹出登录框）。请在工作台的提示栏重新扫码登录，或本地补传视频。' +
             ' 注意：登录态失效时页面只剩站点装饰素材，若不做校验会抓到一段约 9 秒的宣传片，因此这里直接判失败。',
           recovery: 'RELOGIN',
         };
@@ -203,7 +230,7 @@ export class TencentMuseSourceAdapter implements SourceAdapter {
       }
 
       if (acceptPath) {
-        return await okWithInsight(harvest, page, url, acceptPath, insp.title, input.videoId, insight);
+        return await okWithInsight(harvest, page, url, acceptPath, insp.title, input.videoId, ctx.ownerId, insight);
       }
       if (ranked.length === 0) lastError = lastError || '未在页面中发现可下载的媒体地址';
 
@@ -213,7 +240,7 @@ export class TencentMuseSourceAdapter implements SourceAdapter {
           await downloaded[0].saveAs(dest);
           const mismatch = await durationMismatchNote(dest, expectedSec);
           if (fileSize(dest) > 0 && !mismatch) {
-            return await okWithInsight(harvest, page, url, dest, insp.title, input.videoId);
+            return await okWithInsight(harvest, page, url, dest, insp.title, input.videoId, ctx.ownerId);
           }
           if (mismatch) lastError = `页面触发的下载${mismatch}，已排除`;
         } catch {
@@ -226,7 +253,7 @@ export class TencentMuseSourceAdapter implements SourceAdapter {
         const got = await tryBrowserDownload(page, dest, 25_000);
         if (got && fileSize(dest) > 0) {
           const mismatch = await durationMismatchNote(dest, expectedSec);
-          if (!mismatch) return await okWithInsight(harvest, page, url, dest, insp.title, input.videoId);
+          if (!mismatch) return await okWithInsight(harvest, page, url, dest, insp.title, input.videoId, ctx.ownerId);
           lastError = `${lastError}；页面下载入口产出的文件${mismatch}`;
         } else {
           lastError = `${lastError}；页面下载入口也未产出文件`;
@@ -341,9 +368,12 @@ async function okWithInsight(
   dest: string,
   title: string | undefined,
   videoId: string,
+  ownerId: string,
   preInsight?: MuseInsight,
 ): Promise<SourceFetchResult> {
   const insight = preInsight ?? (await fetchMuseInsight({ page, url, harvest }));
+  // L0 免费信号：抓取成功即证明登录态有效，顺手把结论刷新为有效（记在归属人自己名下）
+  markFromFetch(ownerId, 'OK');
   return {
     ok: true,
     localPath: dest,

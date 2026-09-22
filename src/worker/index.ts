@@ -5,6 +5,7 @@ import { cfg, ensureDirs } from '../lib/config';
 import { adapterSummary } from '../lib/ai';
 import { claimNextAttempt, heartbeat, recoverInterruptedAttempts, retryDelay, cancelQueued } from '../lib/queue';
 import { runPipeline } from './pipeline';
+import { museLoginBusy, resetStaleLoginStatus, serviceMuseControl } from './muse-service';
 import { STAGE_LABEL } from '../lib/constants';
 
 /** 明确的临时错误才做有限自动重试；确定性错误不循环重试（PRD 8 实现约定） */
@@ -124,6 +125,7 @@ async function main() {
   const recovered = await recoverInterruptedAttempts();
   console.log(`[worker] 启动，PID=${process.pid}，AI 模式=${cfg.aiMode}，适配器=${JSON.stringify(adapterSummary())}`);
   if (recovered > 0) console.log(`[worker] 恢复中断尝试 ${recovered} 条`);
+  resetStaleLoginStatus();
 
   process.on('SIGINT', () => {
     stopping = true;
@@ -140,6 +142,12 @@ async function main() {
       break;
     }
     try {
+      await serviceMuseControl();
+      // 扫码登录期间不领新任务：保证任一时刻最多一个 Chromium（登录本身要占一个）
+      if (museLoginBusy()) {
+        await sleep(1200);
+        continue;
+      }
       await sweepCancelled();
       const attempt = await claimNextAttempt();
       if (!attempt) {

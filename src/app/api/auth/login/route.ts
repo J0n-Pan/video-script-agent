@@ -17,7 +17,9 @@ export async function POST(req: Request) {
       return fail(401, '账号或密码不正确');
     }
     await createSession(user.id);
-    return ok({ username: user.username, displayName: user.displayName, role: user.role });
+    // 带上自己的 id：登录页要用它清掉「本浏览器已检查过妙思」的记忆，
+    // 让「每次登录工作台后自动检查妙思登录态」成立（见 src/lib/muse-ui.ts）
+    return ok({ id: user.id, username: user.username, displayName: user.displayName, role: user.role });
   } catch (e) {
     return handleError(e);
   }

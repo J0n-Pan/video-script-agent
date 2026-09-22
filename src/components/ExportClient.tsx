@@ -30,15 +30,15 @@ type HistoryRow = {
   downloadUrl: string;
 };
 
-const KIND_TEXT: Record<ExportKind, { button: string; brief: string }> = {
-  SCRIPT: {
-    button: '导出信息流脚本',
-    brief: '按时间轴依次排列的切分文案：表头为「序号 / 时间、标签、文案」，一个转写片段一行，保留时间信息，不按标签聚合。',
-  },
-  LIBRARY: {
-    button: '导出信息流素材库',
-    brief: '按标签聚合的文案合集：表头为「视频分析 / 脚本文案 / 标签分类」，整表只有一行数据，用于素材库归档。',
-  },
+/**
+ * 两个导出入口的按钮文案。
+ *
+ * 2026-09-22 按需求删掉了这里的 `brief` 字段：按钮下方那两行「表头是什么、一行代表什么」的
+ * 说明是给实现者看的规格，不是给编导看的操作提示 —— 编导只要知道点哪个按钮、导出的是哪一版文案。
+ */
+const KIND_TEXT: Record<ExportKind, { button: string }> = {
+  SCRIPT: { button: '导出信息流脚本' },
+  LIBRARY: { button: '导出信息流素材库' },
 };
 
 export default function ExportClient() {
@@ -182,8 +182,7 @@ export default function ExportClient() {
       <div className="card">
         <h2>导出确认</h2>
         <div className="mute2" style={{ marginBottom: 12 }}>
-          输出为 .xlsx，一个视频一个工作表，多视频合并为一个文件。默认按你选择的顺序排列，可在下方调整。
-          导出以所选保存版本生成快照；存在未保存修改时请先在复核页保存。
+          注意：此处导出的是原视频文案！如需导出改写文案，请在改写文案下方点击「导出本版」。
         </div>
 
         {chosen.length === 0 ? (
@@ -253,11 +252,6 @@ export default function ExportClient() {
               <button>返回任务列表</button>
             </Link>
           </div>
-          <div className="mute2" style={{ marginTop: 8 }}>
-            {KIND_TEXT.SCRIPT.brief}
-            <br />
-            {KIND_TEXT.LIBRARY.brief}
-          </div>
         </div>
       </div>
 
@@ -326,9 +320,6 @@ export default function ExportClient() {
       {history.length > 0 && (
         <div className="card">
           <h2>最近导出</h2>
-          <div className="mute2" style={{ marginBottom: 8 }}>
-            文件保留在主机上；页面刷新或引用失效时可从这里重新下载（仅显示本人导出）。
-          </div>
           <table className="grid">
             <thead>
               <tr>

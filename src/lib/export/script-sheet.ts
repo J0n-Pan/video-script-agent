@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
-import { MISSING, SCRIPT_COLUMNS, formatClock, formatRange } from '../constants';
+import { APP_NAME, MISSING, SCRIPT_COLUMNS, formatClock, formatRange } from '../constants';
 import { buildExportFileName, buildSheetNames, formatDateTime } from './sheet-name';
 import { estimateLines, type ExportVideoPayload } from './xlsx';
 
@@ -61,7 +61,7 @@ export async function buildScriptWorkbook(
   outDir: string,
 ): Promise<{ filePath: string; fileName: string }> {
   const wb = new ExcelJS.Workbook();
-  wb.creator = '视频号信息流编导脚本编写 Agent';
+  wb.creator = APP_NAME;
   wb.created = new Date();
 
   const sheetNames = buildSheetNames(payloads.map((p) => ({ title: p.title, seq: p.seq })));

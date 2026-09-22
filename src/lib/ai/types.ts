@@ -131,9 +131,88 @@ export interface OrganizeAdapter {
   organize(input: OrganizeInput): Promise<OrganizeOutput>;
 }
 
+// ---------------------------------------------------------------------------
+// 个性化文案改写（2026-09-20 需求迭代）：结构严格一对一的改写稿生成
+// ---------------------------------------------------------------------------
+
+/** 参考段：来自选定保存版本，按 orderIndex 升序，是本次生成的**结构基准** */
+export type RewriteRefSegment = {
+  id: string;
+  orderIndex: number;
+  tag: string;
+  copyText: string;
+};
+
+/** IP 资料包的一条可引用事实：id 供 RewriteSegment.factRefs 追溯 */
+export type IpFact = {
+  id: string;
+  /** 所属板块：personal 人设 / credentials 资质 / method 方法 / cases 案例 / audience 受众 / offer 课程权益 */
+  section: string;
+  text: string;
+};
+
+export type RewriteInput = {
+  platform: string;
+  platformLabel: string;
+  variantCount: number;
+  refSegments: RewriteRefSegment[];
+  /** 结构化资料包渲染成的文本（含 fact id），模型只能引用其中事实 */
+  ipProfileText: string;
+  ipProfileVersion: number;
+  /**
+   * 违禁词资料包渲染成的文本（「改写稿绝对不能出现」的词/表达）。
+   * 空字符串 = 没有配置或该版本为空，此时提示词里整块不出现。
+   */
+  bannedWordsText: string;
+  /** 生效的违禁词包版本号；无包时为 null（只用于界面显示与追溯） */
+  bannedPackVersion: number | null;
+  /** 参考视频的分析摘要（人群/创意标签等），可空字符串 */
+  videoInsightText: string;
+  formLabel: string;
+  durationMs: number | null;
+  /** 严格结构规则全文（程序与提示词同源，见 lib/rewrite/rules.ts） */
+  rules: string;
+  /**
+   * 本次调用使用的模型；不传则用 REWRITE_MODEL。
+   * 存在的意义是横向实测：同一个适配器要能跑不同模型，比较才成立。
+   */
+  model?: string;
+};
+
+export type RewriteDraftSegment = {
+  orderIndex: number;
+  /** 一对一对应的参考段 id；必须与参考段一一对应 */
+  sourceSegmentId: string | null;
+  tag: string;
+  copyText: string;
+  /** 引用的资料事实 id 列表（可空）；有助追溯但不等于断言真实 */
+  factRefs: string[];
+};
+
+export type RewriteDraft = {
+  variantNo: number;
+  /** 一行差异说明：本稿与其他版本的表达差异 */
+  diffSummary: string;
+  segments: RewriteDraftSegment[];
+  /** 模型明确拒绝生成时的原因（素材不足 / 结构不适配），此时 segments 为空 */
+  blockedReason?: string;
+};
+
+export type RewriteOutput = {
+  drafts: RewriteDraft[];
+  issues: CapabilityIssue[];
+  usage: Usage;
+};
+
+export interface RewriteAdapter {
+  readonly modelId: string;
+  rewrite(input: RewriteInput): Promise<RewriteOutput>;
+}
+
 export type AiAdapters = {
   mode: 'mock' | 'dashscope';
   audio: AudioRecognitionAdapter;
   vision: VisionAdapter;
   organize: OrganizeAdapter;
+  rewrite: RewriteAdapter;
 };

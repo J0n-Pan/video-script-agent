@@ -1,8 +1,9 @@
 import { cfg } from '../config';
-import { MockAudioAdapter, MockOrganizeAdapter, MockVisionAdapter } from './mock';
+import { MockAudioAdapter, MockOrganizeAdapter, MockRewriteAdapter, MockVisionAdapter } from './mock';
 import {
   DashscopeAudioAdapter,
   DashscopeOrganizeAdapter,
+  DashscopeRewriteAdapter,
   DashscopeVisionAdapter,
 } from './dashscope';
 import { DashscopeRealtimeAudioAdapter } from './dashscope/realtime-asr';
@@ -23,6 +24,7 @@ export function getAdapters(): AiAdapters {
           : new DashscopeRealtimeAudioAdapter(),
       vision: new DashscopeVisionAdapter(),
       organize: new DashscopeOrganizeAdapter(),
+      rewrite: new DashscopeRewriteAdapter(),
     };
   } else {
     cached = {
@@ -30,6 +32,7 @@ export function getAdapters(): AiAdapters {
       audio: new MockAudioAdapter(),
       vision: new MockVisionAdapter(),
       organize: new MockOrganizeAdapter(),
+      rewrite: new MockRewriteAdapter(),
     };
   }
   return cached;
@@ -42,6 +45,7 @@ export function adapterSummary() {
     audio: a.audio.modelId,
     vision: a.vision.modelId,
     organize: a.organize.modelId,
+    rewrite: a.rewrite.modelId,
   };
 }
 

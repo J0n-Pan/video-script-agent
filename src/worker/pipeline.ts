@@ -9,6 +9,7 @@ import { classify, isMixedCut, unionMs } from '../lib/classification';
 import { clampSegments, checkTranscriptFidelity, mergeProblems, partitionSegments, problemSummary, validateSegments } from '../lib/validate';
 import { probeMedia, extractAudio, extractSampledFrames } from '../lib/ffmpeg';
 import { getSourceAdapter } from '../lib/sources';
+import type { SourceContext } from '../lib/sources';
 import { audioDirFor, framesDirFor } from '../lib/storage';
 import { FORM, MISSING, MIXED_CUT_MESSAGE, TAG, unclearAt } from '../lib/constants';
 import { setStage } from '../lib/queue';
@@ -44,17 +45,28 @@ export async function runPipeline(params: {
   // ---------- FETCH：来源适配器获取媒体 ----------
   await setStage(attemptId, 'FETCH');
   const adapter = getSourceAdapter(video.sourceType);
-  const avail = await adapter.checkAvailability();
+  /**
+   * 取源上下文带上**任务归属人**。
+   *
+   * 妙思会话自 2026-09-22 起一人一份（每个编导扫自己的腾讯妙思账号），
+   * 所以这里必须传 video.ownerId —— 传错人不仅会抓失败，
+   * 更严重的是可能拿到「对方账号可见的素材」（越权）。
+   */
+  const sourceCtx: SourceContext = { ownerId: video.ownerId };
+  const avail = await adapter.checkAvailability(sourceCtx);
   if (!avail.ok) {
     return { status: 'FAILED', errorCode: avail.code, errorMessage: avail.message, problems: [] };
   }
   const staged = await prisma.mediaAsset.findFirst({ where: { videoId }, orderBy: { createdAt: 'desc' } });
-  const fetched = await adapter.fetch({
-    videoId,
-    url: video.sourceUrl,
-    stagedPath: staged?.status === 'PENDING' ? staged.cachePath : null,
-    fileName: video.fileName,
-  });
+  const fetched = await adapter.fetch(
+    {
+      videoId,
+      url: video.sourceUrl,
+      stagedPath: staged?.status === 'PENDING' ? staged.cachePath : null,
+      fileName: video.fileName,
+    },
+    sourceCtx,
+  );
   if (!fetched.ok) {
     return { status: 'FAILED', errorCode: fetched.code, errorMessage: fetched.message, problems: [] };
   }

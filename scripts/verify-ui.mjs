@@ -69,6 +69,8 @@ check('复核页渲染正常', rp.status === 200 && !rpt.includes('Application e
 const removedFormOpts = ['ai视频', '有ai片段', '真人口播', '真人访谈', '其他及简短说明', '待复核'];
 const browser = await chromium.launch({ headless: true });
 const ctx = await browser.newContext();
+// 验收浏览器关掉妙思自动弹码：任何「已失效」夹具/状态都会真的发起扫码、堵住解析队列
+await ctx.addInitScript(() => localStorage.setItem('museAutoLoginDisabled', '1'));
 await ctx.request.post(`${BASE}/api/auth/login`, { data: creds.editor });
 const page = await ctx.newPage();
 await page.goto(`${BASE}/tasks/${videoId}`, { waitUntil: 'domcontentloaded' });
