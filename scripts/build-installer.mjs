@@ -273,15 +273,43 @@ if (v.status === 0) log(`内嵌运行时 ${v.stdout.trim()}`);
 else if (sameHash) log('内嵌运行时已就位（与构建所用 Node 字节一致，本机禁止执行新写入的 exe，故只校验哈希）');
 else fail('内嵌运行时拷贝不完整');
 
-/* ── 5. 抓取用浏览器内核（只取 headless shell，体积最小）── */
+/* ── 5. 抓取 / 出片用浏览器内核 ─────────────────────────
+ * 必须装**两个**，它们不能互相替代：
+ *   ① chromium_headless_shell —— 无头，妙思抓取、数字人自动提交用。
+ *   ② chromium（完整版）      —— 有头，数字人「人工接手」必须用它弹可见窗口。
+ *
+ * 2026-09-23 故障：此前只装了 ①，编导在改写界面点「生成数字人视频」时，
+ * 有头启动直接报 "Executable doesn't exist at ...\chromium-1243\chrome-win64\chrome.exe"。
+ * 原因就是 headless shell 只有 chrome-headless-shell.exe，**物理上无法显示窗口**。
+ * 完整版大得多（本机实测 433 MB vs 271 MB），但这是「人工接手」能否可用的硬前提，
+ * 不能为了体积把它裁掉。
+ */
 const pwRoot = path.join(os.homedir(), 'AppData', 'Local', 'ms-playwright');
-const shellDir = fs.existsSync(pwRoot)
-  ? fs.readdirSync(pwRoot).find((d) => d.startsWith('chromium_headless_shell-'))
-  : null;
-if (!shellDir) log('未找到 Playwright 内核，安装后首次抓取链接时会自动提示下载');
+const pickBrowsers = (prefix) =>
+  fs.existsSync(pwRoot)
+    ? fs.readdirSync(pwRoot).filter((d) => new RegExp('^' + prefix + '-\\d+$').test(d))
+    : [];
+
+const shellDirs = pickBrowsers('chromium_headless_shell');
+const fullDirs = pickBrowsers('chromium');
+
+if (!shellDirs.length) log('未找到 Playwright 无头内核，安装后首次抓取链接时会自动提示下载');
 else {
-  copyDir(path.join(pwRoot, shellDir), path.join(PAYLOAD, 'browsers', shellDir));
-  log(`装配浏览器内核 ${shellDir}`);
+  for (const d of shellDirs) {
+    copyDir(path.join(pwRoot, d), path.join(PAYLOAD, 'browsers', d));
+    log(`装配无头内核 ${d}`);
+  }
+}
+
+if (!fullDirs.length) {
+  // 不 fail：缺了它只影响「人工接手」，不该让整个构建挂掉；但必须喊出来。
+  log('⚠️ 未找到 Playwright **完整版** 内核：数字人「人工接手」将无法弹出窗口。');
+  log('   请在构建机执行 npx playwright install chromium 后重新构建。');
+} else {
+  for (const d of fullDirs) {
+    copyDir(path.join(pwRoot, d), path.join(PAYLOAD, 'browsers', d));
+    log(`装配完整版内核 ${d}（数字人「人工接手」弹出可见窗口要用）`);
+  }
 }
 
 /* ── 6. 编译卸载器，放进产物目录（由主包的 [Files] 一并装进 {app}） ───── */
@@ -410,5 +438,6 @@ log(
   `本包行为速查：AI=${aiSummary}；` +
     `妙思抓取=${museFetchEnabled ? '已启用（编导需各自扫码登录一次）' : '未启用（编导粘链接会被直接拒绝）'}；` +
     `初始口令=${fs.existsSync(path.join(PAYLOAD, 'initial-accounts.json')) ? '统一固定（首次登录强制改密）' : '每台机器随机'}；` +
-    `自动备份=已启用；卸载入口=程序目录「卸载.exe」`,
+    `自动备份=已启用；卸载入口=程序目录「卸载.exe」；` +
+    `浏览器内核=${shellDirs.length && fullDirs.length ? '无头+完整版（数字人人工接手可用）' : fullDirs.length ? '仅完整版' : '仅无头（⚠️ 数字人人工接手不可用）'}`,
 );
