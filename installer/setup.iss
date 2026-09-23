@@ -86,6 +86,9 @@ Source: "{#MyPayload}\runtime\node\node.exe"; DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#MyPayload}\node_modules\@esbuild\win32-x64\esbuild.exe"; DestDir: "{tmp}"; Flags: dontcopy
 ; kill-nodes.ps1 同理：升级老版本时 {app} 里还没有它，必须从包自身解出兜底清杀脚本。
 Source: "{#MyPayload}\kill-nodes.ps1"; DestDir: "{tmp}"; Flags: dontcopy
+; 备份脚本同理：从 1.1.5 及更早版本升级时 {app} 里没有 backup.js，
+; 而「升级前自动备份」正是最不能缺席的一次备份，必须从包自身解出执行。
+Source: "{#MyPayload}\backup.js"; DestDir: "{tmp}"; Flags: dontcopy
 
 ; 快捷方式不再用 [Icons] 段，改由下方 [Code] 代码创建，原因有二：
 ;   1. v1.1.0 曾把桌面图标写到 {commondesktop}（C:\Users\Public\Desktop），
@@ -204,8 +207,8 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   NodeExe, StopJs, Ps1: String;
-  Code, CodePs: Integer;
-  OkStop, OkPs: Boolean;
+  Code, CodePs, CodeBk: Integer;
+  OkStop, OkPs, OkBk: Boolean;
 begin
   Result := '';
   NodeExe := ExpandConstant('{app}') + '\runtime\node\node.exe';
@@ -223,10 +226,17 @@ begin
   Ps1 := ExpandConstant('{tmp}') + '\kill-nodes.ps1';
   OkPs := Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + Ps1 + '"',
     ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, CodePs);
+  // 升级前自动备份：此刻进程刚被清干净，复制出来的数据库不会是「写到一半」的半截状态。
+  // 备份失败**不拦安装**——装不上比少一份备份更糟，但必须留下痕迹好事后补救。
+  ExtractTemporaryFile('backup.js');
+  OkBk := Exec(ExpandConstant('{tmp}') + '\node.exe',
+    '"' + ExpandConstant('{tmp}') + '\backup.js" --tag=pre-upgrade',
+    ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, CodeBk);
   // 诊断痕迹：写到数据目录（Inno 的 {tmp} 会随安装结束销毁，不能落那里）
   SaveStringToFile(ExpandConstant('{localappdata}') + '\信息流编导工作台\data\installer-prep.log',
     'stop.js execOk=' + IntToStr(Ord(OkStop)) + ' code=' + IntToStr(Code) + #13#10 +
-    'ps1 execOk=' + IntToStr(Ord(OkPs)) + ' code=' + IntToStr(CodePs) + #13#10, False);
+    'ps1 execOk=' + IntToStr(Ord(OkPs)) + ' code=' + IntToStr(CodePs) + #13#10 +
+    'backup execOk=' + IntToStr(Ord(OkBk)) + ' code=' + IntToStr(CodeBk) + #13#10, False);
   if DllReleased(ExpandConstant('{app}') + '\node_modules\.prisma\client\query_engine-windows.dll.node') = False then begin Result := LockAbortMsg(); Exit; end;
   if DllReleased(ExpandConstant('{app}') + '\node_modules\prisma\client\query_engine-windows.dll.node') = False then begin Result := LockAbortMsg(); Exit; end;
   // 运行时二进制：不删除，只在确有版本变化时原地覆盖（失败也只是沿用旧版）
@@ -289,10 +299,27 @@ begin
 end;
 
 // [Icons] 段没有了，卸载时需自己删掉上面创建的快捷方式
+// 卸载：先备份数据，再清掉快捷方式。
+// 卸载本身不碰数据目录（它在 {localappdata} 外侧），但编导往往是在卸载之后
+// 才发现「有份资料还要用」，届时没备份就再也拿不回来。失败只记日志，绝不拦住卸载。
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  NodeExe, StopJs, BkJs: String;
+  Code: Integer;
 begin
   if CurUninstallStep <> usUninstall then
     Exit;
+  NodeExe := ExpandConstant('{app}') + '\runtime\node\node.exe';
+  StopJs := ExpandConstant('{app}') + '\stop.js';
+  BkJs := ExpandConstant('{app}') + '\backup.js';
+  if (FileExists(NodeExe)) and (FileExists(BkJs)) then
+  begin
+    // 先停进程：占用中的数据库复制出来可能是半截的
+    if FileExists(StopJs) then
+      Exec(NodeExe, '"' + StopJs + '"', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code);
+    Exec(NodeExe, '"' + BkJs + '" --tag=pre-uninstall',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code);
+  end;
   DeleteFile(ExpandConstant('{userdesktop}') + '\信息流编导工作台.lnk');
   DelTree(ExpandConstant('{userprograms}') + '\' + '{#MyAppName}', True, True, True);
 end;

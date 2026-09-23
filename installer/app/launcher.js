@@ -128,6 +128,36 @@ async function ensureSchema() {
   return true;
 }
 
+/**
+ * 每天首次启动做一次数据库快照（只拷数据库与配置，几百 KB，成本可忽略）。
+ *
+ * 为什么还需要它：安装/卸载前的备份只挡得住「升级事故」，挡不住编导自己误删、
+ * 或机器哪天硬盘出问题。而纯本地部署下 data\ 是唯一副本，出事就是全部重写。
+ *
+ * 时机刻意放在 initDatabase() 之后、网页与后台进程拉起之前：
+ * 此刻数据库结构已就绪、但还没有任何进程在往里写，复制出来才是一致的。
+ * 失败只记日志，绝不挡住启动。
+ */
+async function dailySnapshot() {
+  const script = path.join(APP_DIR, 'backup.js');
+  if (!fs.existsSync(script)) return;
+  const mark = path.join(DATA_DIR, '..', 'backups', 'auto', '.last-date');
+  const today = new Date().toISOString().slice(0, 10);
+  try {
+    if (fs.existsSync(mark) && fs.readFileSync(mark, 'utf8').trim() === today) return;
+  } catch {
+    /* 读不到就当没做过 */
+  }
+  try {
+    fs.mkdirSync(path.dirname(mark), { recursive: true });
+    fs.writeFileSync(mark, today);
+  } catch {
+    /* 记不下也继续，大不了下次启动多做一次 */
+  }
+  const r = await runNode([script, '--mode=db']);
+  log(`每日快照 -> ${r.code} ${String(r.out).trim().slice(-120)}`);
+}
+
 /** 首次运行：建库 + 建账号。
  *  刻意不用 `prisma db seed`：它会以 `tsx …` 形式调用，而安装包里 node_modules/.bin
  *  不在 PATH（我们内嵌 Node、不经 npm 启动），会报“tsx 不是内部或外部命令”。
@@ -231,6 +261,7 @@ async function main() {
   Object.assign(process.env, readEnvFile(), baseEnv);
 
   await initDatabase();
+  await dailySnapshot();
 
   const children = [];
   children.push(startChild([path.join('node_modules', 'next', 'dist', 'bin', 'next'), 'start', '-p', String(PORT), '-H', '127.0.0.1'], 'web'));
