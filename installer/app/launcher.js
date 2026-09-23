@@ -138,10 +138,17 @@ async function initDatabase() {
   if (!(await ensureSchema())) return;
   if (!first) return;
   log('首次运行，初始化账号…');
+  // 口令必须显式传：不能完全指望 tsx 隐式加载 APP_DIR/.env（那份文件是回填来的，
+  // 回填一旦没成功，seed 会「没口令 → 跳过建号」，装完就登不进去）。
+  const dataEnv = readEnvFile();
   const env = { DATABASE_URL: `file:${db.replace(/\\/g, '/')}` };
+  for (const k of ['SEED_MAINTAINER_PASSWORD', 'SEED_EDITOR_PASSWORD']) {
+    if (dataEnv[k]) env[k] = dataEnv[k];
+  }
   const tsx = path.join(APP_DIR, 'node_modules', 'tsx', 'dist', 'cli.mjs');
   const seed = await runNode([tsx, path.join('prisma', 'seed.ts')], { env });
-  log(`db seed -> ${seed.code} ${seed.out.slice(-200)}`);
+  log(`db seed -> ${seed.code} ${String(seed.out).slice(-200)}`);
+  if (seed.code !== 0) log('账号初始化失败：请检查数据目录 .env 里的 SEED_* 口令是否配置');
 }
 
 // 端口必须以参数传入：它只在 main() 里确定，而这里是词法作用域，
