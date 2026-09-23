@@ -72,6 +72,18 @@ log('装配 prisma / package.json');
 
 // 运行时文件（启动器、初始化、启停脚本）
 copyDir(path.join(ROOT, 'installer', 'app'), PAYLOAD);
+// .vbs 必须转成 UTF-16LE+BOM 才能交给 wscript 执行：
+// wscript 在中文 Windows 按 ANSI(GBK) 解析无 BOM 的 UTF-8，中文注释/提示会被读成
+// 「无效字符 800A0408」，编导双击桌面图标直接报 VBScript 编译错误（v1.1.1 实测翻车）。
+// 仓库里保持 UTF-8 便于阅读与 diff，出包时在这里统一转码。
+for (const e of fs.readdirSync(PAYLOAD)) {
+  if (!e.toLowerCase().endsWith('.vbs')) continue;
+  const p = path.join(PAYLOAD, e);
+  let txt = fs.readFileSync(p, 'utf8');
+  if (txt.charCodeAt(0) === 0xfeff) txt = txt.slice(1);
+  fs.writeFileSync(p, '\ufeff' + txt, { encoding: 'utf16le' });
+  log(`vbs 转码 UTF-16LE+BOM：${e}`);
+}
 log('装配启动器与初始化脚本');
 
 /* ── 3. 生产依赖（不装开发依赖；Playwright 浏览器另行放置）── */
