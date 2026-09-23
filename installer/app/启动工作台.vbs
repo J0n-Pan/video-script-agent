@@ -10,5 +10,5 @@ If Not fso.FileExists(node) Then
   WScript.Quit 1
 End If
 sh.CurrentDirectory = here
-' 最后启动一次会打开浏览器；重复双击只会提示已在运行
+' 首次启动会自动打开浏览器；重复双击不会再起一套进程，只是把已运行的页面打开
 sh.Run """" & node & """ """ & launcher & """", 0, False
