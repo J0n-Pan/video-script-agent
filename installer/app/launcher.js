@@ -214,8 +214,48 @@ function startChild(args, name) {
   return p;
 }
 
-/** 单实例锁：记录启动器 PID 与端口。
- *  已有实例存活时直接打开浏览器并退出——否则会再起一套进程并把 pids.json 覆盖掉，
+/**
+ * AI 配置体检（写日志，并把最误导的组合落成文件）。
+ *
+ * 为什么要单独做：v1.1.6 及更早版本生成的 .env 里写死了 AI_MODE="mock"，
+ * 编导机器上表现为「所有识别都是演示值」，而页面上只有一行轻描淡写的提示，
+ * 维护人员根本判断不出是「没配」还是「配错了」。这里把判断依据落到日志与文件里。
+ */
+function checkAiConfig() {
+  const env = readEnvFile();
+  const mode = env.AI_MODE || 'mock';
+  const key = env.DASHSCOPE_API_KEY || '';
+  log(`AI 模式=${mode} 密钥=${key ? '已配置' : '未配置'}`);
+  const warnPath = path.join(DATA_DIR, 'AI配置检查.txt');
+  try {
+    if (mode === 'dashscope' && !key) {
+      // 最危险的组合：以为在真实识别，其实每次调用都会失败
+      fs.writeFileSync(
+        warnPath,
+        [
+          '⚠ AI 配置异常',
+          '',
+          'AI_MODE 是 dashscope（真实识别），但 DASHSCOPE_API_KEY 是空的。',
+          '这种组合下所有识别都会失败，而且报错信息看不出原因。',
+          '',
+          '改法（二选一，改完重启工作台）：',
+          '  ① 把密钥填进配置文件的 DASHSCOPE_API_KEY 这一行（sk- 开头）',
+          '  ② 或把 AI_MODE 改回 mock，先用演示模式跑通流程',
+          '',
+          '配置文件：' + path.join(DATA_DIR, '.env'),
+          '',
+        ].join('\r\n'),
+      );
+      log('⚠ AI 配置异常：dashscope 模式但密钥为空，已写入 AI配置检查.txt');
+    } else {
+      fs.rmSync(warnPath, { force: true });
+    }
+  } catch {
+    /* 体检失败不该影响启动 */
+  }
+}
+
+/** 单实例锁：记录启动器 PID 与端口。 *  已有实例存活时直接打开浏览器并退出——否则会再起一套进程并把 pids.json 覆盖掉，
  *  老实例从此无法被「停止工作台」关闭（v1.1.2 实测翻车：升级时装不上、也停不掉）。 */
 const LOCK_FILE = path.join(DATA_DIR, 'web.lock');
 function readLock() {
@@ -262,6 +302,7 @@ async function main() {
 
   await initDatabase();
   await dailySnapshot();
+  checkAiConfig();
 
   const children = [];
   children.push(startChild([path.join('node_modules', 'next', 'dist', 'bin', 'next'), 'start', '-p', String(PORT), '-H', '127.0.0.1'], 'web'));

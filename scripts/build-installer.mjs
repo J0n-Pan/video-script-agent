@@ -68,6 +68,22 @@ log(`版本 ${VERSION}`);
 fs.mkdirSync(PAYLOAD, { recursive: true });
 cleanJunk(PAYLOAD); // 清掉历次构建残留在产物目录里的临时副本
 
+/* 产物目录里的 data\ 是**运行时残留**，不是要分发的内容：只要有人直接在
+ * dist\payload\app 里跑过一次 launcher.js（调试、验证「无 node 能不能跑」时会这样），
+ * 它就会生成 data\ 并写入 worker.lock / pids.json 等。
+ * 这些锁文件带着构建机的 PID，装到编导机器上毫无意义，还会让门禁判失败。
+ * 构建脚本本来就**不装配** data\（只装 .next 与 src），所以这里直接清掉即可。 */
+const strayData = path.join(PAYLOAD, 'data');
+if (fs.existsSync(strayData)) {
+  try {
+    fs.rmSync(strayData, { recursive: true, force: true });
+    log('清理产物目录里的运行时残留 data\\（调试时跑过工作台留下的）');
+  } catch (e) {
+    // 删不掉就交给门禁拦住：宁可构建失败，也不能把本机残留发出去
+    log(`运行时残留 data\\ 清理失败（${e.message}），将由门禁拦截`);
+  }
+}
+
 /* ── 2. 按白名单装配程序文件 ────────────────────────── */
 for (const item of ['.next', 'src']) {
   const s = path.join(ROOT, item);
@@ -138,6 +154,43 @@ if (fs.existsSync(presetFile)) {
   log('未配置统一初始口令，装机时随机生成（每台机器不同）');
 }
 
+/* ── 2c. AI 配置（可选；不配则装机后是演示模式）─────────
+ * 把 installer/ai-config.local.json（**已 gitignore，绝不进仓库**）注入包内的
+ * ai-config.json，装机时由 init-env.js 写进数据目录的 .env。
+ *
+ * 为什么要有这一步：v1.1.6 及更早版本在 init-env.js 里**写死** AI_MODE="mock"，
+ * 于是每台编导机器都停在演示模式，页面上只有一行「当前 AI 适配器为 Mock 模式」，
+ * 看不出是「没配」还是「配错了」——这是本次要修的问题。
+ *
+ * 密钥随包分发是有意为之（内测 3~5 人）：不这样做，编导机器就永远只能跑演示模式。
+ * 代价是拿到包的人理论上能提取密钥，可接受；后续要收口可改为装完人工填一次。 */
+const aiFile = path.join(ROOT, 'installer', 'ai-config.local.json');
+let aiSummary = '未配置 → 装机后为演示模式（mock）';
+if (fs.existsSync(aiFile)) {
+  let j = {};
+  try {
+    j = JSON.parse(fs.readFileSync(aiFile, 'utf8'));
+  } catch {
+    fail('installer/ai-config.local.json 不是合法 JSON');
+  }
+  const key = typeof j.apiKey === 'string' ? j.apiKey.trim() : '';
+  if (!/^sk-[A-Za-z0-9_.-]{10,}$/.test(key)) {
+    fail(`installer/ai-config.local.json 的 apiKey 不合法（应形如 sk-xxxxxxxx，当前长度 ${key.length}）`);
+  }
+  const aiOut = {
+    apiKey: key,
+    region: typeof j.region === 'string' && j.region.trim() ? j.region.trim() : 'beijing',
+    visionModel: typeof j.visionModel === 'string' && j.visionModel.trim() ? j.visionModel.trim() : 'qwen3-vl-plus',
+    organizeModel: typeof j.organizeModel === 'string' && j.organizeModel.trim() ? j.organizeModel.trim() : 'qwen3.8-flash',
+  };
+  if (typeof j.rewriteModel === 'string' && j.rewriteModel.trim()) aiOut.rewriteModel = j.rewriteModel.trim();
+  fs.writeFileSync(path.join(PAYLOAD, 'ai-config.json'), JSON.stringify(aiOut, null, 2));
+  aiSummary = `dashscope（key: ${key.slice(0, 6)}***${key.slice(-4)}，区域 ${aiOut.region}）`;
+  log(`注入 AI 配置：${aiSummary}`);
+} else {
+  log('未配置 AI 密钥，装机后为演示模式（页面上会有明确提示）');
+}
+
 /* ── 3. 生产依赖（不装开发依赖；Playwright 浏览器另行放置）── */
 const npmEnv = { ...process.env, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1', npm_config_audit: 'false', npm_config_fund: 'false' };
 const run = (args) => {
@@ -196,11 +249,25 @@ else {
 /* ── 6. 硬门禁：本机数据与密钥绝不能进包 ─────────────── */
 log('扫描产物：确认不含任何本机数据与密钥…');
 const localEnv = fs.existsSync(path.join(ROOT, '.env')) ? fs.readFileSync(path.join(ROOT, '.env'), 'utf8') : '';
+// 本机 .env 里的敏感值一律不得进包。唯独可以进包的是「包内 AI 密钥」——
+// 那是**有意随包分发**的（见 2c 段说明），所以从扫描名单里剔掉，
+// 但仍要求它只出现在 ai-config.json 里（下面单独核对）。
+const packagedKey = fs.existsSync(path.join(PAYLOAD, 'ai-config.json'))
+  ? (JSON.parse(fs.readFileSync(path.join(PAYLOAD, 'ai-config.json'), 'utf8')).apiKey ?? '')
+  : '';
 const secrets = [];
+const secretLabels = [];
 for (const line of localEnv.split('\n')) {
   const m = /^\s*(DASHSCOPE_API_KEY|SESSION_SECRET|SEED_\w+)\s*=\s*"?([^"#]+)"?/.exec(line);
-  if (m && m[2] && m[2].trim().length >= 6 && m[2].trim() !== 'change-me-local-only') secrets.push(m[2].trim());
+  if (!m || !m[2]) continue;
+  const v = m[2].trim();
+  if (v.length < 6 || v === 'change-me-local-only' || v === packagedKey) continue;
+  secrets.push(v);
+  secretLabels.push(m[1]);
 }
+// 包内密钥只能在 ai-config.json 出现：出现在别处（日志/快照/临时文件）说明某处把配置整个 dump 了
+const AI_KEY_ALLOWED = /ai-config\.json$/i;
+const packagedKeyHits = [];
 const FORBIDDEN_NAME = /(\.db$|\.sqlite$|\.sqlite3$)/i;
 const FORBIDDEN_PATH = /(\\data\\|\\_scratch\\|\\\.git\\|muse-session\\state\.json|avatar-session\\state\.json)/i;
 const problems = [];
@@ -221,25 +288,35 @@ function scan(dir) {
     if (isDep) continue;
     if (FORBIDDEN_NAME.test(e.name)) problems.push(`数据库文件 ${p}`);
     if (FORBIDDEN_PATH.test(p)) problems.push(`敏感路径 ${p}`);
+    if (fs.statSync(p).size >= 2_000_000) continue;
+    let txt = '';
+    try {
+      txt = fs.readFileSync(p, 'utf8');
+    } catch {
+      continue;
+    }
     // 文本文件内容里出现本机密钥 → 直接判失败
-    if (secrets.length && fs.statSync(p).size < 2_000_000) {
-      let txt = '';
-      try {
-        txt = fs.readFileSync(p, 'utf8');
-      } catch {
-        continue;
-      }
-      for (const s of secrets) if (txt.includes(s)) problems.push(`密钥明文出现在 ${p}`);
+    for (const s of secrets) if (txt.includes(s)) problems.push(`密钥明文出现在 ${p}`);
+    if (packagedKey && txt.includes(packagedKey) && !AI_KEY_ALLOWED.test(e.name)) {
+      packagedKeyHits.push(path.relative(PAYLOAD, p));
     }
   }
 }
 scan(PAYLOAD);
+if (packagedKeyHits.length) {
+  console.error('包内 AI 密钥出现在 ai-config.json 以外的文件里（疑似被某处整个 dump 出来）：');
+  for (const p of packagedKeyHits.slice(0, 20)) console.error('  - ' + p);
+  process.exit(1);
+}
 if (problems.length) {
   console.error('门禁未通过，以下本机内容被装进了产物：');
   for (const p of problems.slice(0, 20)) console.error('  - ' + p);
   process.exit(1);
 }
-log(`门禁通过（已核对 ${secrets.length} 项本机密钥、无数据库/会话/数据目录）`);
+log(
+  `门禁通过（已核对 ${secrets.length} 项本机密钥${secretLabels.length ? '：' + [...new Set(secretLabels)].join('/') : ''}、` +
+    `无数据库/会话/数据目录${packagedKey ? '；包内 AI 密钥仅存在于 ai-config.json' : ''}）`,
+);
 
 /* ── 7. 编译安装包 ─────────────────────────────────── */
 if (!fs.existsSync(ISCC)) fail(`未找到 Inno Setup 编译器：${ISCC}`);
@@ -264,3 +341,4 @@ const sha = crypto.createHash('sha256').update(fs.readFileSync(out)).digest('hex
 fs.writeFileSync(`${out}.sha256`, sha);
 log(`完成：${out}（${size.toFixed(0)} MB）`);
 log(`校验：sha256=${sha}`);
+log(`本包行为速查：AI=${aiSummary}；初始口令=${fs.existsSync(path.join(PAYLOAD, 'initial-accounts.json')) ? '统一固定（首次登录强制改密）' : '每台机器随机'}；自动备份=已启用`);
