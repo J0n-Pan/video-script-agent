@@ -121,6 +121,63 @@ begin
 end;
 
 { Inno 的 BoolToStr 是单参版本，这里自己写一个带文案的，避免依赖具体签名 }
+function BoolText(const B: Boolean): String;
+begin
+  if B then
+    Result := '是'
+  else
+    Result := '否';
+end;
+
+{ 把文本写成 UTF-16LE + BOM 的文件。
+  ★ 必须这样写：wscript.exe 读 .vbs 时不认无 BOM 的 UTF-8，会按 ANSI(GBK) 解释，
+    中文全部变乱码 → 报「无效字符」800A0408。仓库里的 .vbs 也都是 UTF-16LE+BOM 存的，
+    构建脚本里专门有一步「脚本转码（BOM）」。
+
+  ★ 这里有三个曾经踩过的坑（2026-09-23，改之前务必看完）：
+    ① 别用 SaveStringToFile 写 —— 它的形参是 AnsiString，会把 Unicode 字符按系统
+       代码页（中文机上是 GBK）转换，转不出的字符直接变成 '?'。
+       实测首字节写出 3f 74（= '?t'）而不是 ff fe，整个脚本作废。
+    ② 别自己算「低字节/高字节」再拼两个小时 —— TFileStream.WriteBuffer 接的是
+       **String**，它把每个 UTF-16 码元原样展开成 2 个字节（小端）。
+       所以一个码元就已经是 2 字节，再手动拆一次会把长度翻倍。
+       正确做法：BOM 用单个字符 #$FEFF（它的字节表示正好是 FF FE），
+       正文逐字符原样追加即可。
+    ③ ★ Count 参数必须传**字节数**（= 字符数 × 2），不是字符数！
+       传 Length(Raw) 会只写出一半的字节 → 文件字节数为奇数 →
+       末尾那个字符被截断成半个码元 → wscript 报
+       「Microsoft VBScript 编译器错误: 无效字符」(行 1 列 1)。
+       这个错看起来像 BOM 问题，其实是长度算错，极难联想，务必记住。 }
+procedure SaveStringToFileUTF16(const Path, Text: String);
+var
+  F: TFileStream;
+  Raw: String;
+begin
+  Raw := #$FEFF + Text;
+  F := TFileStream.Create(Path, fmCreate);
+  try
+    { Count 是字节数：每个 UTF-16 码元占 2 字节 }
+    F.WriteBuffer(Raw, Length(Raw) * 2);
+  finally
+    F.Free;
+  end;
+end;
+
+{ 把来源字符串里的 Needle 全换成 Repl（From/To 是 Pascal 保留字，不能用） }
+function ReplaceStr(const S, Needle, Repl: String): String;
+var
+  P: Integer;
+  R: String;
+begin
+  R := S;
+  repeat
+    P := Pos(Needle, R);
+    if P > 0 then
+      R := Copy(R, 1, P - 1) + Repl + Copy(R, P + Length(Needle), Length(R));
+  until P = 0;
+  Result := R;
+end;
+
 function ChoiceText(const Purge: Boolean): String;
 begin
   if Purge then
@@ -244,39 +301,106 @@ begin
   Result := T;
 end;
 
-{ 判断当前这份 exe 是不是「正从程序目录里跑」—— 是则需要挪走。
-  两种情况都不需要挪：
-    · 已经在系统临时目录里（说明是挪过来的第二趟，再挪会无限递归）；
-    · 不在 app 目录下（例如维护人员手工拷出来跑），本来就不占着程序目录。 }
-function NeedsRelocate(): Boolean;
-var
-  SelfPath: String;
+
+{ 排查用的日志：整个卸载过程只写这一个文件，方便事后看走到哪一步 }
+function RelocateLog(): String;
 begin
-  SelfPath := ExpandConstant('{srcexe}');
-  Result := (CompareText(ExtractFileDir(SelfPath), SysTemp()) <> 0)
-    and (Pos('\app\', SelfPath) > 0);
+  Result := RootDir() + '\uninstall-relocate.log';
 end;
 
-{ 把自己从程序目录挪到系统临时目录再重启一次。
-  为什么必须这么做：编导是从程序目录里的「卸载.exe」双击进来的，这个文件当时**被自己占用**，
-  官方卸载器删到它时会失败 —— 结果是卸载"成功"了但程序目录里永远留着一个删不掉的
-  「卸载.exe」，再点它还会跑一遍，看起来像没卸载干净。
-  做法：复制自身到系统临时目录，重新拉起，然后本进程立刻退出，
-  程序目录里那份就不再被占用，可被正常删除。
-  · 用系统临时目录而不是 Inno 内置的临时目录：后者会随本进程退出被清理，
-    而临时副本那时还在运行，会被连带删掉（Windows 上删运行中的 exe 会失败、
-    但目录清理逻辑可能干扰），用系统临时目录最稳。
-  · 临时副本留到系统清理即可 —— 它只是一个几百 KB 的 exe。 }
-procedure RelocateAndRelaunch();
-var
-  SelfPath, TempCopy: String;
-  Code: Integer;
+procedure LogRelocate(const Line: String);
 begin
-  SelfPath := ExpandConstant('{srcexe}');
-  TempCopy := SysTemp() + '\信息流编导工作台-卸载.exe';
-  if not CopyFile(SelfPath, TempCopy, False) then
-    Exit;
-  Exec(TempCopy, '', '', SW_SHOW, ewNoWait, Code);
+  { 目录可能已被删（卸载走完一遍后再点一次）→ 先补建，否则日志写不进去、
+    排查时又会变成「什么都没留下」的假象。 }
+  if not DirExists(RootDir()) then
+    ForceDirectories(RootDir());
+  SaveStringToFile(RelocateLog(), Line + NL(), True);
+end;
+
+{ 启动一个**分离的清理器**，它等本进程退出后删除残留。
+  ★ 为什么不再用「复制自身 → 重启」那套（2026-09-23 换掉）：
+    InitializeSetup 阶段既读不了 srcexe（CopyFile=0、TFileStream 抛异常）、
+    也改不了它的名（RenameFile=0），而 ParamStr(0) 只是 Inno 解包出来的镜像，
+    复制它再运行毫无意义。那条路在本阶段**物理上走不通**。
+  ★ 新做法：把「删干净自己」这件事外包给一个不占 app 目录的外部进程。
+    · 用 VBS（由 Windows 脚本宿主执行）而不是 bat：VBS 可 SW_HIDE 启动、无黑框闪现；
+    · 脚本在**系统临时目录**里生成，运行完自删，不留痕；
+    · 它先轮询等本 exe 退出（最长 60 秒），再补删 app 目录与桌面快捷方式；
+    · 本进程随后立刻退出，于是 app\卸载.exe 的占用被释放，能被删掉。
+  ★ 脚本内容必须写成 UTF-16LE+BOM（见 SaveStringToFileUTF16 的三个坑），
+    且 Exec 必须用 ewNoWait —— 我们要立刻返回、让本进程尽快退出释放占用。 }
+procedure LaunchCleanupShim(const Purge: Boolean);
+var
+  ShimPath, Shim, PurgeFlag: String;
+  Code, ShimBytes: Integer;
+  Ok: Boolean;
+begin
+  ShimPath := SysTemp() + '\信息流编导工作台-清理.vbs';
+  if Purge then
+    PurgeFlag := 'True'
+  else
+    PurgeFlag := 'False';
+
+  { 用单引号包裹 VBS 里的字符串；路径里的单引号极少见，但为稳妥做一次转义 }
+  Shim :=
+    'Option Explicit' + NL() +
+    'Dim fso, sh, me_exe, root, app, data, bak, desk' + NL() +
+    'Set fso = CreateObject("Scripting.FileSystemObject")' + NL() +
+    'Set sh  = CreateObject("WScript.Shell")' + NL() +
+    'me_exe = "' + ReplaceStr(ExpandConstant('{srcexe}'), '"', '""') + '"' + NL() +
+    'root   = fso.GetParentFolderName(fso.GetParentFolderName(me_exe))' + NL() +
+    'app    = fso.GetParentFolderName(me_exe)' + NL() +
+    'data   = root & "\data"' + NL() +
+    'bak    = root & "\backups"' + NL() +
+    'desk   = sh.SpecialFolders("Desktop") & "\信息流编导工作台.lnk"' + NL() +
+    '' + NL() +
+    ''' 等本进程（卸载.exe）退出，最长 60 秒' + NL() +
+    'Dim i, still' + NL() +
+    'For i = 1 To 120' + NL() +
+    '  still = False' + NL() +
+    '  On Error Resume Next' + NL() +
+    '  Dim h: Set h = fso.GetFile(me_exe)' + NL() +
+    '  If Err.Number <> 0 Then still = False Else still = True' + NL() +
+    '  Err.Clear' + NL() +
+    '  On Error Goto 0' + NL() +
+    '  If Not still Then Exit For' + NL() +
+    '  WScript.Sleep 500' + NL() +
+    'Next' + NL() +
+    'WScript.Sleep 1200' + NL() +
+    '' + NL() +
+    ''' 删不掉的（例如仍在被占用）就跳过，不中断' + NL() +
+    'On Error Resume Next' + NL() +
+    'If ' + PurgeFlag + ' Then' + NL() +
+    '  fso.DeleteFolder data, True' + NL() +
+    '  fso.DeleteFolder bak, True' + NL() +
+    'End If' + NL() +
+    'fso.DeleteFile app & "\卸载.exe", True' + NL() +
+    'fso.DeleteFile desk, True' + NL() +
+    'If ' + PurgeFlag + ' Then fso.DeleteFolder root, True' + NL() +
+    'Err.Clear' + NL() +
+    'On Error Goto 0' + NL() +
+    '' + NL() +
+    ''' 自删（脚本自己从 TEMP 里消失）' + NL() +
+    'On Error Resume Next' + NL() +
+    'fso.DeleteFile WScript.ScriptFullName, True' + NL();
+
+  { VBS 必须 UTF-16LE + BOM，否则脚本宿主按 ANSI 读、中文变乱码/报错 }
+  SaveStringToFileUTF16(ShimPath, Shim);
+
+  { ★ 自检：UTF-16LE 文件的字节数必须是**偶数**。
+    写成奇数 = 末字节被截断 = 脚本宿主报「无效字符」而完全不执行，
+    且现象与「BOM 写错」一模一样、极难排查（2026-09-23 实际踩了 2 小时）。
+    这里主动算一次并记进日志，一旦再出现编码问题可以一眼定位。 }
+  ShimBytes := 0;
+  if FileSize(ShimPath, ShimBytes) and ((ShimBytes mod 2) <> 0) then
+    LogRelocate('★ 严重：清理脚本字节数为奇数(' + IntToStr(ShimBytes)
+      + ')，脚本不会被脚本宿主执行，app 目录会残留「卸载.exe」');
+
+  Ok := Exec('wscript.exe', '"' + ShimPath + '"', '', SW_HIDE, ewNoWait, Code);
+  LogRelocate('LaunchCleanupShim: 脚本=' + ShimPath + ' 生成=' + BoolText(FileExists(ShimPath))
+    + ' 字节=' + IntToStr(ShimBytes) + ' Exec=' + BoolText(Ok) + ' Code=' + IntToStr(Code));
+  if not FileExists(ShimPath) then
+    LogRelocate('警告：清理脚本没写成功，app 目录可能残留「卸载.exe」');
 end;
 
 function InitializeSetup(): Boolean;
@@ -289,12 +413,14 @@ begin
   { 返回 False = 本 exe 不安装任何东西；所有事都在这里做完 }
   Result := False;
 
-  { 第一件事：确保自己不是正从程序目录里运行，否则卸不干净自己 }
-  if NeedsRelocate() then
-  begin
-    RelocateAndRelaunch();
-    Exit;
-  end;
+  { 进门先留痕：万一后面哪一步静默失败，至少能确认「InitializeSetup 被调到了」 }
+  LogRelocate('==== 卸载入口被调用 ' + GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + ' ====');
+
+  { ★ 不再「复制自身到 TEMP 再重启」（2026-09-23 弃用，原因见 LaunchCleanupShim 注释）。
+    改为：本进程走完全程后，交给一个分离的 VBS 清理器去删 app\卸载.exe 自己。
+    这里只记录一下我们是从哪儿跑的，便于排查。 }
+  LogRelocate('ParamStr(0)=' + ParamStr(0));
+  LogRelocate('srcexe=' + ExpandConstant('{srcexe}'));
 
   if not FileExists(OfficialUninstaller()) then
   begin
@@ -353,13 +479,18 @@ begin
   begin
     DeleteTreeLogged(DataDir(), FailLog());
     DeleteTreeLogged(BackupDir(), FailLog());
-    { 程序目录可能还剩被占用的散件，再清一层 }
+    { 程序目录可能还剩被占用的散件，再清一层。
+      注意 app\卸载.exe 必然删不掉 —— 那正是本进程自己，会在下面交给清理器。 }
     DeleteTreeLogged(AppDir(), FailLog());
     DeleteTreeLogged(RootDir(), FailLog());
   end;
 
   { 桌面快捷方式兜底删除（主安装包自己也会删，这里防它提前退出） }
   DeleteFile(ExpandConstant('{userdesktop}') + '\信息流编导工作台.lnk');
+
+  { ★ 关键收尾：启一个分离的清理器，等本进程退出后删掉 app\卸载.exe。
+    必须在弹完成提示**之前**启动，否则用户看提示的这段时间里它还没开始干活。 }
+  LaunchCleanupShim(PurgeData);
 
   if PurgeData then
     MsgBox('卸载完成。' + NL() + NL()
