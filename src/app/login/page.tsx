@@ -30,7 +30,8 @@ export default function LoginPage() {
       // 每次登录工作台都要重走一遍妙思自动检查，所以这里清掉「本浏览器已检查过」的记忆。
       // 放在登录成功这个唯一必然经过的点上（登出不一定发生：可能直接关标签页）。
       clearMuseAutoCheck(j.data?.id ?? '');
-      router.replace('/tasks');
+      // 用了装机初始口令的账号：先去改密，改完才能进工作台（服务端同样拦截）
+      router.replace(j.data?.mustChangePassword ? '/change-password' : '/tasks');
       router.refresh();
     } catch (err) {
       setError(`请求失败：${(err as Error).message}`);

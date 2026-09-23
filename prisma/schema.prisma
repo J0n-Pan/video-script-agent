@@ -20,6 +20,8 @@ model User {
   passwordHash String
   role         String   @default("EDITOR") // EDITOR 编导 / MAINTAINER 部署维护人员
   status       String   @default("ACTIVE") // ACTIVE / DISABLED
+  // 装机时用统一初始口令建号，首次登录必须先改掉（内测分发：避免一个口令长期通用）
+  mustChangePassword Boolean @default(false)
   createdAt    DateTime @default(now())
 
   batches   Batch[]

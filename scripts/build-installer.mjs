@@ -109,6 +109,35 @@ for (const e of fs.readdirSync(PAYLOAD)) {
 }
 log('装配启动器与初始化脚本');
 
+/* ── 2b. 统一初始口令（可选，默认随机）────────────────
+ * 内测分发时想让所有编导机器用同一组初始口令：把口令写进
+ * installer/initial-accounts.local.json（**已 gitignore，绝不进仓库**）：
+ *   { "maintainer": "……", "editor": "……" }
+ * 构建时注入包内的 initial-accounts.json；没这个文件就什么都不做，
+ * 装机时随机生成（每台机器不同）。
+ * 注意：口令会随安装包分发，拿到包的人理论上能提取出来，
+ * 所以它只负责「装好能进」，账号一律标记首次登录须改密。 */
+const presetFile = path.join(ROOT, 'installer', 'initial-accounts.local.json');
+if (fs.existsSync(presetFile)) {
+  let j = {};
+  try {
+    j = JSON.parse(fs.readFileSync(presetFile, 'utf8'));
+  } catch {
+    fail(`installer/initial-accounts.local.json 不是合法 JSON`);
+  }
+  const out = {};
+  for (const k of ['maintainer', 'editor']) {
+    const v = typeof j[k] === 'string' ? j[k].trim() : '';
+    if (!v) fail(`installer/initial-accounts.local.json 缺少 ${k} 口令`);
+    if (v.length < 8) fail(`${k} 口令至少 8 位（当前 ${v.length} 位）`);
+    out[k] = v;
+  }
+  fs.writeFileSync(path.join(PAYLOAD, 'initial-accounts.json'), JSON.stringify(out, null, 2));
+  log('注入统一初始口令（maintainer / editor）');
+} else {
+  log('未配置统一初始口令，装机时随机生成（每台机器不同）');
+}
+
 /* ── 3. 生产依赖（不装开发依赖；Playwright 浏览器另行放置）── */
 const npmEnv = { ...process.env, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1', npm_config_audit: 'false', npm_config_fund: 'false' };
 const run = (args) => {

@@ -3,10 +3,16 @@
  *
  * 只做三件事，全部自动生成、编导无需输入：
  *   1. 建数据目录（在程序目录**外侧**，升级/重装都不会动它）
- *   2. 生成 .env：随机会话密钥 + 随机账号口令 + 数据目录指向
+ *   2. 生成 .env：随机会话密钥 + 账号口令 + 数据目录指向
  *   3. 把初始账号写进 数据目录/初始账号.txt，编导打不开工作台时可以翻开看
  *
- * 为什么口令随机：安装包装到谁机器上都是同一份文件，写死口令等于公开口令。
+ * 口令有两个来源，优先用前者：
+ *   ① 包内 initial-accounts.json —— 内测分发时想让所有编导机器用同一组口令，
+ *      由构建脚本从 installer/initial-accounts.local.json（**不进仓库**）注入；
+ *   ② 都没有就随机生成（默认）：安装包发到谁机器上都是同一份文件，写死即公开。
+ *
+ * 无论哪种来源，建出来的账号都会被标记「首次登录须改密」，
+ * 所以统一口令只用于「装好能进」，不会长期通用。
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -19,6 +25,23 @@ const rnd = (n = 16) => crypto.randomBytes(n).toString('base64url').slice(0, n);
 // 口令只给可见字符，避免编导手抄时把 0/O、l/1 抄错
 const pwd = () => crypto.randomBytes(12).toString('base64url').replace(/[^a-zA-Z0-9]/g, '').slice(0, 14);
 
+/** 包内固定的初始口令（构建时注入；没注入就返回空，走随机） */
+function readPresetPasswords() {
+  try {
+    const p = path.join(APP_DIR, 'initial-accounts.json');
+    if (!fs.existsSync(p)) return {};
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const out = {};
+    for (const k of ['maintainer', 'editor']) {
+      const v = typeof j[k] === 'string' ? j[k].trim() : '';
+      if (v.length >= 8) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 function main() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   for (const d of ['media', 'exports', 'tmp', 'muse-session', 'avatar-session', 'avatars']) {
@@ -27,8 +50,9 @@ function main() {
 
   const envPath = path.join(DATA_DIR, '.env');
   if (!fs.existsSync(envPath)) {
-    const maintainerPwd = pwd();
-    const editorPwd = pwd();
+    const preset = readPresetPasswords();
+    const maintainerPwd = preset.maintainer || pwd();
+    const editorPwd = preset.editor || pwd();
     const toWin = (p) => p.replace(/\\/g, '/');
     const env = [
       '# 由安装程序生成（每台电脑都不一样），修改后重启工作台生效',
@@ -46,7 +70,7 @@ function main() {
       'DASHSCOPE_API_KEY=""',
       'MUSE_FETCH_ENABLED="false"',
       '',
-      '# 初始账号口令（首次建库时用，之后可在工作台里改）',
+      '# 初始账号口令（建号时用；登录后会被要求改成自己的）',
       `SEED_MAINTAINER_PASSWORD="${maintainerPwd}"`,
       `SEED_EDITOR_PASSWORD="${editorPwd}"`,
       '',
@@ -54,7 +78,16 @@ function main() {
     fs.writeFileSync(envPath, env);
     fs.writeFileSync(
       path.join(DATA_DIR, '初始账号.txt'),
-      ['工作台初始账号（由安装程序生成，请妥善保管）', '', `维护人员：maintainer / ${maintainerPwd}`, `编导：editor / ${editorPwd}`, '', '数据目录：' + DATA_DIR, ''].join('\n'),
+      [
+        '工作台初始账号（由安装程序生成，请妥善保管）',
+        '',
+        `维护人员：maintainer / ${maintainerPwd}`,
+        `编导：editor / ${editorPwd}`,
+        '',
+        '首次登录后系统会要求你先改密码，改完才能进入工作台。',
+        '数据目录：' + DATA_DIR,
+        '',
+      ].join('\n'),
     );
   }
 

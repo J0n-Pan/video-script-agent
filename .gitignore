@@ -1,6 +1,8 @@
 node_modules/
 .next/
 .next-old-*/
+.nx/
+.nx-old-*/
 out/
 data/
 _scratch/
@@ -11,4 +13,6 @@ _scratch/
 next-env.d.ts
 tsconfig.tsbuildinfo
 dist/
+# 统一初始口令：只进安装包，绝不进公开仓库
+installer/initial-accounts.local.json
 trace

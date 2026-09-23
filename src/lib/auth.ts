@@ -19,6 +19,8 @@ export type SessionUser = {
   username: string;
   displayName: string;
   role: string;
+  /** 用了装机初始口令的账号，首次登录必须先改掉（内测分发：不让一个口令长期通用） */
+  mustChangePassword: boolean;
 };
 
 export async function createSession(userId: string) {
@@ -58,6 +60,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
     username: s.user.username,
     displayName: s.user.displayName,
     role: s.user.role,
+    mustChangePassword: s.user.mustChangePassword,
   };
 }
 
@@ -70,9 +73,19 @@ export class HttpError extends Error {
   }
 }
 
-export async function requireUser(): Promise<SessionUser> {
+/**
+ * 后端会话校验：登录态失效即拒绝，不依赖前端隐藏入口（PRD 2.1 实现约定）。
+ *
+ * 默认还会拦住「用了初始口令但还没改密」的会话（409）：
+ * 强制改密不能只做在前端——否则改密页只是一道障眼法，直接调接口照样能用初始口令读写数据。
+ * 因此需要放行的接口（改密本身、登出）必须显式声明 allowStalePassword。
+ */
+export async function requireUser(opts?: { allowStalePassword?: boolean }): Promise<SessionUser> {
   const u = await getCurrentUser();
   if (!u) throw new HttpError(401, '未登录或登录态已失效');
+  if (u.mustChangePassword && !opts?.allowStalePassword) {
+    throw new HttpError(409, '首次登录请先修改密码');
+  }
   return u;
 }
 

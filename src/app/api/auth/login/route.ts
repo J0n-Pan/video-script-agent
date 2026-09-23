@@ -19,7 +19,14 @@ export async function POST(req: Request) {
     await createSession(user.id);
     // 带上自己的 id：登录页要用它清掉「本浏览器已检查过妙思」的记忆，
     // 让「每次登录工作台后自动检查妙思登录态」成立（见 src/lib/muse-ui.ts）
-    return ok({ id: user.id, username: user.username, displayName: user.displayName, role: user.role });
+    // mustChangePassword：用了装机初始口令的账号，前端据此直接跳改密页
+    return ok({
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      role: user.role,
+      mustChangePassword: user.mustChangePassword,
+    });
   } catch (e) {
     return handleError(e);
   }

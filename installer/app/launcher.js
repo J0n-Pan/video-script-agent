@@ -14,6 +14,7 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
+const crypto = require('node:crypto');
 
 const net = require('node:net');
 
@@ -89,19 +90,55 @@ function readEnvFile() {
   return out;
 }
 
+/**
+ * 结构迁移（含首次建库）。
+ * 以前只在「库文件不存在」时建库，于是后来新增的字段（例如 mustChangePassword）
+ * 在已装过的机器上永远不会生效，一查就报错。每次无脑 push 又要让编导多等几秒，
+ * 所以用 schema 指纹折中：结构没变就跳过。
+ * 刻意不带 --accept-data-loss：新增字段不需要它，带上反而可能悄悄丢数据。
+ */
+async function ensureSchema() {
+  const schema = path.join(APP_DIR, 'prisma', 'schema.prisma');
+  const mark = path.join(DATA_DIR, '.schema-sha');
+  let sha = '';
+  try {
+    sha = crypto.createHash('sha256').update(fs.readFileSync(schema)).digest('hex');
+  } catch (e) {
+    log(`读 schema 失败：${e && e.message}`);
+    return false;
+  }
+  let prev = '';
+  try {
+    prev = fs.readFileSync(mark, 'utf8').trim();
+  } catch {
+    /* 没跑过 */
+  }
+  if (prev === sha) return true;
+  const cli = path.join(APP_DIR, 'node_modules', 'prisma', 'build', 'index.js');
+  const r = await runNode([cli, 'db', 'push', '--skip-generate', `--schema=${schema}`], {
+    env: { DATABASE_URL: `file:${path.join(DATA_DIR, 'app.db').replace(/\\/g, '/')}` },
+  });
+  log(`db push -> ${r.code} ${String(r.out).slice(-200)}`);
+  if (r.code !== 0) return false;
+  try {
+    fs.writeFileSync(mark, sha);
+  } catch {
+    /* 记不下指纹下次再跑一次，无害 */
+  }
+  return true;
+}
+
 /** 首次运行：建库 + 建账号。
  *  刻意不用 `prisma db seed`：它会以 `tsx …` 形式调用，而安装包里 node_modules/.bin
  *  不在 PATH（我们内嵌 Node、不经 npm 启动），会报“tsx 不是内部或外部命令”。
  *  这里一律用内嵌 node 直接执行脚本，路径全部显式给出。 */
 async function initDatabase() {
   const db = path.join(DATA_DIR, 'app.db');
-  if (fs.existsSync(db)) return;
-  log('首次运行，初始化数据库…');
-  const cli = path.join(APP_DIR, 'node_modules', 'prisma', 'build', 'index.js');
-  const schema = path.join(APP_DIR, 'prisma', 'schema.prisma');
+  const first = !fs.existsSync(db);
+  if (!(await ensureSchema())) return;
+  if (!first) return;
+  log('首次运行，初始化账号…');
   const env = { DATABASE_URL: `file:${db.replace(/\\/g, '/')}` };
-  const push = await runNode([cli, 'db', 'push', '--skip-generate', '--accept-data-loss', `--schema=${schema}`], { env });
-  log(`db push -> ${push.code}`);
   const tsx = path.join(APP_DIR, 'node_modules', 'tsx', 'dist', 'cli.mjs');
   const seed = await runNode([tsx, path.join('prisma', 'seed.ts')], { env });
   log(`db seed -> ${seed.code} ${seed.out.slice(-200)}`);
