@@ -56,7 +56,7 @@ import {
  *     而这类 bug 在界面上看起来完全正常（读到了另一份结论）。
  */
 
-export type MuseHealthStatus = 'VALID' | 'EXPIRED' | 'MISSING' | 'UNKNOWN';
+export type MuseHealthStatus = 'VALID' | 'EXPIRED' | 'MISSING' | 'UNKNOWN' | 'FETCH_DISABLED';
 
 /** 结论的来源，用于在界面上说明「这个结论有多可信」 */
 export type MuseHealthSource = 'PROBE' | 'FETCH_OK' | 'FETCH_FAIL' | 'NONE';
@@ -168,6 +168,12 @@ export function writeHealth(userId: string, h: MuseHealth): MuseHealth {
 
 /** 登录态是否「需要人工处理」——决定横幅是否出现 */
 export function needsAttention(h: MuseHealth): boolean {
+  // 2026-09-23 补：抓取开关关着时也必须弹横幅。
+  // 故障背景：出厂默认曾是 MUSE_FETCH_ENABLED=false，此时 probe 早退写 UNKNOWN，
+  // 而这里只认 EXPIRED/MISSING → 横幅不渲染 → 编导粘链接必然失败、
+  // 界面上却**没有任何修复入口**（连「去扫码登录」按钮都不出现），只能无路可走。
+  // 所以「功能被关掉」本身就是最该让人看见的状态。
+  if (h.status === 'FETCH_DISABLED') return true;
   return h.status === 'EXPIRED' || h.status === 'MISSING';
 }
 
@@ -273,21 +279,30 @@ export function checkSessionFile(userId: string): MuseHealth | null {
  *   3. 两者都不命中 → UNKNOWN，不武断宣称失效（避免网络异常/改版时误报吓人）。
  */
 export async function probeMuseSession(userId: string): Promise<MuseHealth> {
+  const b = base(userId);
+
+  // 顺序很关键：**先判开关，再判会话文件**。
+  // 若颠倒，未登录时 checkSessionFile 会先返回 MISSING，横幅照常弹，
+  // 但给编导指的路是「去扫码登录」—— 而开关关着时扫完依然失败，是条死路。
+  // 换句话说：功能没开的时候，让他去扫码是误导。
+  if (!cfg.muse.fetchEnabled) {
+    // 用独立状态而不是 UNKNOWN：UNKNOWN 的语义是「探不出结论、不必打扰用户」，
+    // 而这里是「功能被关掉了、必须打扰用户」——两者混用会让横幅静默（09-23 故障）。
+    return writeHealth(userId, {
+      status: 'FETCH_DISABLED',
+      checkedAt: new Date().toISOString(),
+      source: 'PROBE',
+      message:
+        '妙思链接抓取功能未启用（MUSE_FETCH_ENABLED=false）：粘妙思链接会被直接拒绝，只能走本地补传。' +
+        '请让维护人员把程序配置里的 MUSE_FETCH_ENABLED 改为 true 并重启工作台。',
+      ...b,
+    });
+  }
+
   const fileVerdict = checkSessionFile(userId);
   if (fileVerdict) return fileVerdict;
 
   const started = Date.now();
-  const b = base(userId);
-
-  if (!cfg.muse.fetchEnabled) {
-    return writeHealth(userId, {
-      status: 'UNKNOWN',
-      checkedAt: new Date().toISOString(),
-      source: 'PROBE',
-      message: '妙思抓取未启用（MUSE_FETCH_ENABLED=false）：妙思链接只能走本地补传。',
-      ...b,
-    });
-  }
 
   let browser: Awaited<ReturnType<typeof openMuseBrowser>> | null = null;
   try {

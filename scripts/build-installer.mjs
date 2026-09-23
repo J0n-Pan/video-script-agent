@@ -84,6 +84,33 @@ if (fs.existsSync(strayData)) {
   }
 }
 
+/* 同理清掉产物目录里任何**运行期生成**的 .env 及其备份。
+ * 真实来源（2026-09-23 实测踩到）：调试时把 init-env.js 指向产物目录跑过一次，
+ * 于是 dist\payload\app\.env 里留下了一份**带真实密钥**的配置 ——
+ * 它不在装配白名单里，纯属残留，但门禁会（正确地）判失败。
+ * 注意要递归找：落点会随 WORKBENCH_DATA_DIR 的取值漂移，不能只查根目录。 */
+const strayEnv = [];
+(function findStrayEnv(dir) {
+  if (!fs.existsSync(dir)) return;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      // node_modules 里可能有依赖自带的 .env 示例，不碰
+      if (e.name !== 'node_modules') findStrayEnv(p);
+    } else if (/^\.env$|^\.env\.bak-/.test(e.name)) {
+      strayEnv.push(p);
+    }
+  }
+})(PAYLOAD);
+for (const p of strayEnv) {
+  try {
+    fs.rmSync(p, { force: true });
+    log(`清理产物目录里的运行时残留配置：${path.relative(PAYLOAD, p)}`);
+  } catch (e) {
+    log(`运行时残留配置清理失败（${e.message}），将由门禁拦截：${path.relative(PAYLOAD, p)}`);
+  }
+}
+
 /* ── 2. 按白名单装配程序文件 ────────────────────────── */
 for (const item of ['.next', 'src']) {
   const s = path.join(ROOT, item);
@@ -191,6 +218,17 @@ if (fs.existsSync(aiFile)) {
   log('未配置 AI 密钥，装机后为演示模式（页面上会有明确提示）');
 }
 
+/* 妙思抓取的出厂开关：直接读 init-env.js 里那一行，而不是在构建脚本里另写一份默认值。
+   背景（2026-09-23 故障）：出厂默认曾是 false，导致编导粘妙思链接必失败，
+   而界面上又没有修复入口。构建时把它打出来，是为了让「这个包到底开没开」一眼可见。 */
+const initEnvSrc = fs.readFileSync(path.join(ROOT, 'installer', 'app', 'init-env.js'), 'utf8');
+const museDefault = /'MUSE_FETCH_ENABLED="([^"]*)"/.exec(initEnvSrc)?.[1];
+if (museDefault === undefined) {
+  fail('在 installer/app/init-env.js 里找不到 MUSE_FETCH_ENABLED 的出厂默认值（正则失配，别静默放过）');
+}
+const museFetchEnabled = museDefault === 'true';
+log(`妙思抓取出厂开关：MUSE_FETCH_ENABLED="${museDefault}"`);
+
 /* ── 3. 生产依赖（不装开发依赖；Playwright 浏览器另行放置）── */
 const npmEnv = { ...process.env, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1', npm_config_audit: 'false', npm_config_fund: 'false' };
 const run = (args) => {
@@ -246,7 +284,30 @@ else {
   log(`装配浏览器内核 ${shellDir}`);
 }
 
-/* ── 6. 硬门禁：本机数据与密钥绝不能进包 ─────────────── */
+/* ── 6. 编译卸载器，放进产物目录（由主包的 [Files] 一并装进 {app}） ───── */
+// 卸载器是「同一个 AppId 的独立 exe」：它不装文件，只驱动官方 unins000.exe，
+// 并在编导选择「连数据一起删」时清理 {localappdata} 下的数据/备份目录。
+// 时机很关键，两条硬约束：
+//   ① 必须在**门禁扫描之前**产出 —— 这样它自己也过一遍密钥/数据扫描；
+//   ② 必须在**主包编译之前**产出 —— 主包用 {#MyPayload}\* 通配收文件，
+//      晚于主包编译就等于没被打进去。
+const UNINST_EXE = '卸载.exe';
+if (!fs.existsSync(ISCC)) fail(`未找到 Inno Setup 编译器：${ISCC}`);
+log('编译卸载器（卸载.exe）…');
+execFileSync(
+  ISCC,
+  ['/Qp', `/DMyOutDir=${PAYLOAD}`, path.join(ROOT, 'installer', 'uninstaller.iss')],
+  {
+    cwd: ROOT,
+    stdio: 'inherit',
+    env: { ...process.env, WORKBENCH_VERSION: VERSION, WORKBENCH_UNINST_VERSION: VERSION },
+  },
+);
+const uninstPath = path.join(PAYLOAD, UNINST_EXE);
+if (!fs.existsSync(uninstPath)) fail('未产出卸载器（卸载.exe）');
+log(`卸载器已就位：${UNINST_EXE}（${(fs.statSync(uninstPath).size / 1024).toFixed(0)} KB）`);
+
+/* ── 7. 硬门禁：本机数据与密钥绝不能进包 ─────────────── */
 log('扫描产物：确认不含任何本机数据与密钥…');
 const localEnv = fs.existsSync(path.join(ROOT, '.env')) ? fs.readFileSync(path.join(ROOT, '.env'), 'utf8') : '';
 // 本机 .env 里的敏感值一律不得进包。唯独可以进包的是「包内 AI 密钥」——
@@ -304,8 +365,12 @@ function scan(dir) {
 }
 scan(PAYLOAD);
 if (packagedKeyHits.length) {
-  console.error('包内 AI 密钥出现在 ai-config.json 以外的文件里（疑似被某处整个 dump 出来）：');
+  console.error('包内 AI 密钥出现在 ai-config.json 以外的文件里 —— 这是**密钥泄漏**，必须处理：');
   for (const p of packagedKeyHits.slice(0, 20)) console.error('  - ' + p);
+  console.error('');
+  console.error('  最常见原因：调试时在 dist\\payload 里跑过 init-env.js / launcher.js，');
+  console.error('  留下了运行期的 .env。构建脚本已会自动清掉这类残留；');
+  console.error('  若这里仍报，说明是别的东西把配置整个 dump 了出来，逐个看上面这份清单。');
   process.exit(1);
 }
 if (problems.length) {
@@ -318,7 +383,7 @@ log(
     `无数据库/会话/数据目录${packagedKey ? '；包内 AI 密钥仅存在于 ai-config.json' : ''}）`,
 );
 
-/* ── 7. 编译安装包 ─────────────────────────────────── */
+/* ── 8. 编译安装包 ─────────────────────────────────── */
 if (!fs.existsSync(ISCC)) fail(`未找到 Inno Setup 编译器：${ISCC}`);
 log('编译安装包（压缩耗时较长，请耐心等待）…');
 // 路径必须用绝对路径传给 Inno：它以 .iss 所在目录解析相对路径，传相对路径会找错地方
@@ -341,4 +406,9 @@ const sha = crypto.createHash('sha256').update(fs.readFileSync(out)).digest('hex
 fs.writeFileSync(`${out}.sha256`, sha);
 log(`完成：${out}（${size.toFixed(0)} MB）`);
 log(`校验：sha256=${sha}`);
-log(`本包行为速查：AI=${aiSummary}；初始口令=${fs.existsSync(path.join(PAYLOAD, 'initial-accounts.json')) ? '统一固定（首次登录强制改密）' : '每台机器随机'}；自动备份=已启用`);
+log(
+  `本包行为速查：AI=${aiSummary}；` +
+    `妙思抓取=${museFetchEnabled ? '已启用（编导需各自扫码登录一次）' : '未启用（编导粘链接会被直接拒绝）'}；` +
+    `初始口令=${fs.existsSync(path.join(PAYLOAD, 'initial-accounts.json')) ? '统一固定（首次登录强制改密）' : '每台机器随机'}；` +
+    `自动备份=已启用；卸载入口=程序目录「卸载.exe」`,
+);

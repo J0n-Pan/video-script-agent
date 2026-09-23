@@ -35,7 +35,7 @@ import { museAutoCheckKey } from '@/lib/muse-ui';
  */
 
 type Health = {
-  status: 'VALID' | 'EXPIRED' | 'MISSING' | 'UNKNOWN';
+  status: 'VALID' | 'EXPIRED' | 'MISSING' | 'UNKNOWN' | 'FETCH_DISABLED';
   checkedAt: string | null;
   message: string;
   cookieCount: number;

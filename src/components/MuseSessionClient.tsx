@@ -23,7 +23,7 @@ import { fmtLocalFull } from '@/lib/datetime';
  */
 
 type Health = {
-  status: 'VALID' | 'EXPIRED' | 'MISSING' | 'UNKNOWN';
+  status: 'VALID' | 'EXPIRED' | 'MISSING' | 'UNKNOWN' | 'FETCH_DISABLED';
   checkedAt: string | null;
   source: string;
   message: string;
@@ -56,6 +56,8 @@ const STATUS_LABEL: Record<string, string> = {
   EXPIRED: '登录态已失效',
   MISSING: '尚无登录会话',
   UNKNOWN: '状态未知',
+  // 不是登录问题，是配置问题：这里点名说出来，避免编导反复扫码
+  FETCH_DISABLED: '抓取功能未启用（配置问题）',
 };
 
 const PHASE_LABEL: Record<string, string> = {

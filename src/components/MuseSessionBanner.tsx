@@ -26,7 +26,7 @@ import { museBannerCollapseKey } from '@/lib/muse-ui';
  */
 
 type Health = {
-  status: 'VALID' | 'EXPIRED' | 'MISSING' | 'UNKNOWN';
+  status: 'VALID' | 'EXPIRED' | 'MISSING' | 'UNKNOWN' | 'FETCH_DISABLED';
   checkedAt: string | null;
   source: string;
   message: string;
@@ -174,6 +174,9 @@ export default function MuseSessionBanner() {
   if (collapsed === h.status) return null;
 
   const danger = h.status === 'EXPIRED';
+  // 功能被关掉是「配置问题」，不是「登录问题」——文案与按钮都要区别对待，
+  // 否则让编导反复去扫码，而扫完依然是失败的（09-23 故障）。
+  const disabled = h.status === 'FETCH_DISABLED';
   const waitProbe = data.probePending || busy;
 
   return (
@@ -181,11 +184,23 @@ export default function MuseSessionBanner() {
       <div className="mb-row">
         <div className="mb-main">
           <div className="mb-title">
-            你的腾讯妙思登录态{danger ? '已失效' : '未就绪'}，妙思链接会在抓取阶段失败
+            {disabled
+              ? '妙思链接抓取功能未启用，粘贴妙思链接会被直接拒绝'
+              : `你的腾讯妙思登录态${danger ? '已失效' : '未就绪'}，妙思链接会在抓取阶段失败`}
           </div>
           <div className="mb-body">
-            脚本文字与来源信息<strong>不受影响</strong> —— 失败的只是视频本体副本。
-            可重新登录后重试该链接，或对这条任务使用本地补传。
+            {disabled ? (
+              <>
+                这不是你的操作问题 —— 程序配置里的 MUSE_FETCH_ENABLED 是关闭的，
+                需要<strong>维护人员</strong>改配置并重启工作台。
+                在此期间请对这类任务改用<strong>本地补传</strong>视频。
+              </>
+            ) : (
+              <>
+                脚本文字与来源信息<strong>不受影响</strong> —— 失败的只是视频本体副本。
+                可重新登录后重试该链接，或对这条任务使用本地补传。
+              </>
+            )}
           </div>
           <div className="mb-meta">
             判定依据：{SOURCE_LABEL[h.source] ?? h.source} · 上次检测 {agoText(h.checkedAt)}
@@ -199,11 +214,17 @@ export default function MuseSessionBanner() {
         </div>
 
         <div className="mb-actions">
-          <Link href="/settings/muse-session">
-            <button className="primary" disabled={busy}>
-              去扫码登录
-            </button>
-          </Link>
+          {disabled ? (
+            <Link href="/settings/muse-session">
+              <button disabled={busy}>查看详情</button>
+            </Link>
+          ) : (
+            <Link href="/settings/muse-session">
+              <button className="primary" disabled={busy}>
+                去扫码登录
+              </button>
+            </Link>
+          )}
           <button onClick={() => void recheck()} disabled={busy}>
             {busy ? '检测中…' : '重新检测'}
           </button>

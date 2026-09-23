@@ -75,6 +75,12 @@ chinesesimp.ButtonFinish=完成
 ; 写成相对路径 / 绝对路径 / 分号分隔都无效（会静默不排除）。
 ; 包里只有 runtime\node\node.exe 与 @esbuild\win32-x64\esbuild.exe 两个同名文件，不会被误伤。
 Source: "{#MyPayload}\*"; DestDir: "{app}"; Excludes: "node.exe,esbuild.exe"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 「卸载.exe」是给编导用的中文卸载入口（见 installer\uninstaller.iss）。
+; 上面那行通配其实已经会把它带进来，这里再显式写一条，是为了：
+;   ① 避免将来有人往 Excludes 里加东西时误伤它；
+;   ② 让「包里为什么有这个东西」在安装脚本里就能读到答案。
+; 卸载时会由官方卸载器按安装清单删除；它自己不注册卸载项、不落任何文件。
+Source: "{#MyPayload}\卸载.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; 这两个二进制改为单独安装，带 onlyifdoesntexist：目标已存在就原样跳过，绝不走「删除后替换」。
 ; 原因（2026-09-23 实测）：升级时 Inno 会「先删旧文件再写新文件」，而部分机器的安全策略
 ; 禁止删除 exe（与被占用无关，重命名却可以），结果报「DeleteFile 失败；错误代码 5」、
