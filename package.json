@@ -1,6 +1,6 @@
 {
   "name": "video-script-agent",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "信息流编导工作台 —— 本地部署版（PRD v1.1）",
   "scripts": {
@@ -39,6 +39,7 @@
     "rewrite:compare": "tsx scripts/rewrite-compare.ts",
     "rewrite:demo": "tsx scripts/make-demo-rewrite.ts",
     "avatar:login": "tsx scripts/avatar-login.ts",
+    "build:installer": "node scripts/build-installer.mjs",
     "avatar:check": "tsx scripts/avatar-login.ts --check",
     "avatar:smoke": "tsx scripts/avatar-smoke.ts",
     "worker:avatar": "tsx src/worker/avatar.ts",

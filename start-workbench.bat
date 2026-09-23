@@ -11,6 +11,19 @@ rem ============================================================
 setlocal
 cd /d "%~dp0"
 
+rem --- zero-friction guards: give a human-readable hint instead of raw errors ---
+where node >nul 2>&1
+if errorlevel 1 (
+  echo.
+  echo [fail] 这台电脑还没有安装 Node.js。
+  echo        请打开浏览器访问  https://nodejs.org/zh-cn  ，
+  echo        下载 22 LTS（长期支持版）安装包，双击一路「下一步」装完，
+  echo        装好后重新双击本脚本即可。
+  echo.
+  pause
+  exit /b 1
+)
+
 if /i "%~1"=="clean" (
   echo [setup] removing .next build cache ...
   if exist ".next" rmdir /s /q ".next"
@@ -18,6 +31,7 @@ if /i "%~1"=="clean" (
 
 if not exist "node_modules" (
   echo [setup] node_modules not found - running npm install ...
+  echo         （首次安装约 1~3 分钟，请耐心等待）
   call npm install
   if errorlevel 1 goto :fail
 )
@@ -30,6 +44,14 @@ if not exist ".env" (
 if not exist "node_modules\.prisma\client" (
   echo [setup] prisma client not found - running npm run setup ...
   call npm run setup
+  if errorlevel 1 goto :fail
+)
+
+rem --- playwright chromium: needed for Tencent Muse link fetching / QR login ---
+if not exist "%LOCALAPPDATA%\ms-playwright" (
+  echo [setup] browser engine for link fetching not found - downloading ...
+  echo         （约 150MB，只需要这一次，请耐心等待）
+  call npx playwright install chromium
   if errorlevel 1 goto :fail
 )
 

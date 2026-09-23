@@ -3,6 +3,8 @@
 
 generator client {
   provider = "prisma-client-js"
+  // 打包分发：显式声明目标平台，避免装机后 query engine 缺失（默认只含构建机平台）
+  binaryTargets = ["native", "windows"]
 }
 
 datasource db {
