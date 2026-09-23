@@ -312,30 +312,7 @@ if (!fullDirs.length) {
   }
 }
 
-/* ── 6. 编译卸载器，放进产物目录（由主包的 [Files] 一并装进 {app}） ───── */
-// 卸载器是「同一个 AppId 的独立 exe」：它不装文件，只驱动官方 unins000.exe，
-// 并在编导选择「连数据一起删」时清理 {localappdata} 下的数据/备份目录。
-// 时机很关键，两条硬约束：
-//   ① 必须在**门禁扫描之前**产出 —— 这样它自己也过一遍密钥/数据扫描；
-//   ② 必须在**主包编译之前**产出 —— 主包用 {#MyPayload}\* 通配收文件，
-//      晚于主包编译就等于没被打进去。
-const UNINST_EXE = '卸载.exe';
-if (!fs.existsSync(ISCC)) fail(`未找到 Inno Setup 编译器：${ISCC}`);
-log('编译卸载器（卸载.exe）…');
-execFileSync(
-  ISCC,
-  ['/Qp', `/DMyOutDir=${PAYLOAD}`, path.join(ROOT, 'installer', 'uninstaller.iss')],
-  {
-    cwd: ROOT,
-    stdio: 'inherit',
-    env: { ...process.env, WORKBENCH_VERSION: VERSION, WORKBENCH_UNINST_VERSION: VERSION },
-  },
-);
-const uninstPath = path.join(PAYLOAD, UNINST_EXE);
-if (!fs.existsSync(uninstPath)) fail('未产出卸载器（卸载.exe）');
-log(`卸载器已就位：${UNINST_EXE}（${(fs.statSync(uninstPath).size / 1024).toFixed(0)} KB）`);
-
-/* ── 7. 硬门禁：本机数据与密钥绝不能进包 ─────────────── */
+/* ── 6. 硬门禁：本机数据与密钥绝不能进包 ─────────────── */
 log('扫描产物：确认不含任何本机数据与密钥…');
 const localEnv = fs.existsSync(path.join(ROOT, '.env')) ? fs.readFileSync(path.join(ROOT, '.env'), 'utf8') : '';
 // 本机 .env 里的敏感值一律不得进包。唯独可以进包的是「包内 AI 密钥」——
@@ -392,6 +369,38 @@ function scan(dir) {
   }
 }
 scan(PAYLOAD);
+
+/* 安全软件误报的回归护栏（2026-09-23 新增）：
+ * 1.2.0 的自研「卸载.exe」内含「写 VBS 到临时目录 → 隐藏执行 → 递归删目录 → 自删」的行为链，
+ * 被 Windows Defender 判为 Program:Script/Wacapew.A!ml 并当场隔离，等于卸载入口直接消失；
+ * 而且这是**内容级判定**，改文件名没用、每台机器都会复现（详见 dist/验收步骤-1.2.1.txt 的安全说明）。
+ * 所以这里硬性拦住：产物里一旦再出现 .ps1 或自研卸载 exe，直接构建失败，
+ * 把人逼回「只用官方卸载器 + 系统自带命令」这条路。node_modules 里第三方自带的 .ps1 不在此列。
+ */
+const suspicious = [];
+(function findSuspicious(dir) {
+  if (!fs.existsSync(dir)) return;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    const rel = path.relative(PAYLOAD, p);
+    if (rel.split(path.sep).includes('node_modules')) continue;
+    if (e.isDirectory()) {
+      findSuspicious(p);
+      continue;
+    }
+    if (/\.ps1$/i.test(e.name) || e.name === '卸载.exe') suspicious.push(rel);
+  }
+})(PAYLOAD);
+if (suspicious.length) {
+  console.error('产物里出现了已知会被安全软件判为可疑的文件，构建中止：');
+  for (const p of suspicious) console.error('  - ' + p);
+  console.error('');
+  console.error('  自研卸载器（含 VBS 自清理）与 PowerShell 脚本都已废弃：');
+  console.error('  · 卸载入口用 installer/setup.iss 里指向 unins000.exe 的中文「卸载.lnk」；');
+  console.error('  · 停进程用 installer/app/stop.js（内部走系统自带 taskkill /T）。');
+  process.exit(1);
+}
+
 if (packagedKeyHits.length) {
   console.error('包内 AI 密钥出现在 ai-config.json 以外的文件里 —— 这是**密钥泄漏**，必须处理：');
   for (const p of packagedKeyHits.slice(0, 20)) console.error('  - ' + p);
@@ -411,7 +420,7 @@ log(
     `无数据库/会话/数据目录${packagedKey ? '；包内 AI 密钥仅存在于 ai-config.json' : ''}）`,
 );
 
-/* ── 8. 编译安装包 ─────────────────────────────────── */
+/* ── 7. 编译安装包 ─────────────────────────────────── */
 if (!fs.existsSync(ISCC)) fail(`未找到 Inno Setup 编译器：${ISCC}`);
 log('编译安装包（压缩耗时较长，请耐心等待）…');
 // 路径必须用绝对路径传给 Inno：它以 .iss 所在目录解析相对路径，传相对路径会找错地方
@@ -438,6 +447,6 @@ log(
   `本包行为速查：AI=${aiSummary}；` +
     `妙思抓取=${museFetchEnabled ? '已启用（编导需各自扫码登录一次）' : '未启用（编导粘链接会被直接拒绝）'}；` +
     `初始口令=${fs.existsSync(path.join(PAYLOAD, 'initial-accounts.json')) ? '统一固定（首次登录强制改密）' : '每台机器随机'}；` +
-    `自动备份=已启用；卸载入口=程序目录「卸载.exe」；` +
+    `自动备份=已启用；卸载入口=官方卸载器 unins000.exe（程序目录与开始菜单各有中文「卸载.lnk」指向它）；` +
     `浏览器内核=${shellDirs.length && fullDirs.length ? '无头+完整版（数字人人工接手可用）' : fullDirs.length ? '仅完整版' : '仅无头（⚠️ 数字人人工接手不可用）'}`,
 );

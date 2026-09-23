@@ -20,9 +20,10 @@ ans = MsgBox("即将把工作台数据恢复到最近一次备份。" & vbCrLf &
   "确定要继续吗？", 33, "信息流编导工作台")
 If ans <> 1 Then WScript.Quit
 
-' 停止工作台：数据文件被占用时恢复会失败或被写坏
+' 停止工作台：数据文件被占用时恢复会失败或被写坏。
+' stop.js 自己就把「记录里的 PID + 孤儿实例（按端口兜底）+ 强杀」都做完了，
+' 过去这里还要再补一条 powershell -ExecutionPolicy Bypass 调 kill-nodes.ps1，已删（安全软件误报源）。
 sh.Run node & " """ & here & "\stop.js""", 0, True
-sh.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & here & "\kill-nodes.ps1""", 0, True
 
 Set ex2 = sh.Exec(node & " """ & here & "\restore.js""")
 out = ex2.StdOut.ReadAll()
