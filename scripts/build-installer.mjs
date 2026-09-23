@@ -31,12 +31,31 @@ const fail = (s) => {
 function rmrf(p) {
   fs.rmSync(p, { recursive: true, force: true });
 }
+// Inno 安装被中断时会在目标目录留下「<文件名>.tmp<数字>」的临时副本，
+// 这些文件曾被原样带回打包产物、又被下一个包带进编导机器（实测一次 114MB）。
+// 装配时一律跳过，并把产物目录里已存在的同类垃圾清掉。
+const JUNK = /(\.tmp\d+|\.bak)$/i;
+function cleanJunk(dir) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) cleanJunk(p);
+    else if (JUNK.test(e.name)) {
+      try {
+        fs.rmSync(p, { force: true });
+        log(`清理临时垃圾 ${path.relative(PAYLOAD, p)}`);
+      } catch {
+        /* 清不掉也不该让构建失败 */
+      }
+    }
+  }
+}
 function copyDir(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
   for (const e of fs.readdirSync(src, { withFileTypes: true })) {
     const s = path.join(src, e.name);
     const d = path.join(dest, e.name);
     if (e.isDirectory()) copyDir(s, d);
+    else if (JUNK.test(e.name)) continue;
     else fs.copyFileSync(s, d);
   }
 }
@@ -47,6 +66,7 @@ function copyDir(src, dest) {
  * 构建脚本只负责往全新目录里写，保证任何时候都不会触发删除守卫。 */
 log(`版本 ${VERSION}`);
 fs.mkdirSync(PAYLOAD, { recursive: true });
+cleanJunk(PAYLOAD); // 清掉历次构建残留在产物目录里的临时副本
 
 /* ── 2. 按白名单装配程序文件 ────────────────────────── */
 for (const item of ['.next', 'src']) {
@@ -72,17 +92,20 @@ log('装配 prisma / package.json');
 
 // 运行时文件（启动器、初始化、启停脚本）
 copyDir(path.join(ROOT, 'installer', 'app'), PAYLOAD);
-// .vbs 必须转成 UTF-16LE+BOM 才能交给 wscript 执行：
-// wscript 在中文 Windows 按 ANSI(GBK) 解析无 BOM 的 UTF-8，中文注释/提示会被读成
-// 「无效字符 800A0408」，编导双击桌面图标直接报 VBScript 编译错误（v1.1.1 实测翻车）。
+// 脚本类文件必须按目标解释器的编码要求转码（否则编导机器上一跑就乱码/报错）：
+//   .vbs → UTF-16LE+BOM：Windows 脚本宿主按 ANSI(GBK) 解析无 BOM 的 UTF-8，
+//          中文注释/提示会被读成「无效字符 800A0408」（v1.1.1 实测翻车）；
+//   .ps1 → UTF-8+BOM：PowerShell 5.1 无 BOM 的 UTF-8 会被当 ANSI 读，中文一样乱码。
 // 仓库里保持 UTF-8 便于阅读与 diff，出包时在这里统一转码。
 for (const e of fs.readdirSync(PAYLOAD)) {
-  if (!e.toLowerCase().endsWith('.vbs')) continue;
+  const lower = e.toLowerCase();
+  if (!lower.endsWith('.vbs') && !lower.endsWith('.ps1')) continue;
   const p = path.join(PAYLOAD, e);
   let txt = fs.readFileSync(p, 'utf8');
   if (txt.charCodeAt(0) === 0xfeff) txt = txt.slice(1);
-  fs.writeFileSync(p, '\ufeff' + txt, { encoding: 'utf16le' });
-  log(`vbs 转码 UTF-16LE+BOM：${e}`);
+  if (lower.endsWith('.vbs')) fs.writeFileSync(p, '\ufeff' + txt, { encoding: 'utf16le' });
+  else fs.writeFileSync(p, '\ufeff' + txt, { encoding: 'utf8' });
+  log(`脚本转码（BOM）：${e}`);
 }
 log('装配启动器与初始化脚本');
 

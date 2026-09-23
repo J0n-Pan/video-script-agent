@@ -20,6 +20,7 @@ try {
     for (const p of pids) kill(p);
     fs.rmSync(pidFile, { force: true });
   }
+  fs.rmSync(path.join(DATA_DIR, 'web.lock'), { force: true });
 } catch {
   /* ignore */
 }

@@ -107,11 +107,14 @@ async function initDatabase() {
   log(`db seed -> ${seed.code} ${seed.out.slice(-200)}`);
 }
 
-function waitReady(ms = 60_000) {
+// 端口必须以参数传入：它只在 main() 里确定，而这里是词法作用域，
+// 直接写 PORT 会取不到（首发版就是这么写的，结果一调用就 ReferenceError，
+// main() 提前 reject → 浏览器不自动打开、退出钩子也没注册上）。
+function waitReady(port, ms = 60_000) {
   const deadline = Date.now() + ms;
   return new Promise((resolve) => {
     const tick = () => {
-      const req = http.get({ host: '127.0.0.1', port: PORT, path: '/login', timeout: 1500 }, (res) => {
+      const req = http.get({ host: '127.0.0.1', port: port, path: '/login', timeout: 1500 }, (res) => {
         res.resume();
         resolve(res.statusCode < 500);
       });
@@ -137,11 +140,38 @@ function startChild(args, name) {
   return p;
 }
 
+/** 单实例锁：记录启动器 PID 与端口。
+ *  已有实例存活时直接打开浏览器并退出——否则会再起一套进程并把 pids.json 覆盖掉，
+ *  老实例从此无法被「停止工作台」关闭（v1.1.2 实测翻车：升级时装不上、也停不掉）。 */
+const LOCK_FILE = path.join(DATA_DIR, 'web.lock');
+function readLock() {
+  try { return JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8')); } catch { return null; }
+}
+function pidAlive(pid) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
 async function main() {
   ensureDirs();
   ensureEnv();
 
+  // 升级旗标：安装器插上的（插旗→清杀→替换文件→摘旗），期间启动会锁住文件打断升级
+  if (fs.existsSync(path.join(DATA_DIR, 'upgrade.lock'))) {
+    log('检测到升级正在进行，本次启动取消');
+    return;
+  }
+
+  const prev = readLock();
+  if (prev && pidAlive(prev.pid)) {
+    log(`已有工作台在跑（pid=${prev.pid}），直接打开浏览器后退出`);
+    spawn('cmd', ['/c', 'start', '', `http://127.0.0.1:${prev.port || DEFAULT_PORT}`], { windowsHide: true, stdio: 'ignore' });
+    return;
+  }
+
   const PORT = await pickPort(DEFAULT_PORT);
+  // 先占单实例锁再拉子进程；被强杀留下的旧锁靠 pid 失活自愈
+  try { fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, port: PORT })); } catch { /* ignore */ }
   const baseEnv = {
     PORT: String(PORT),
     DATABASE_URL: `file:${path.join(DATA_DIR, 'app.db').replace(/\\/g, '/')}`,
@@ -171,12 +201,8 @@ async function main() {
     /* ignore */
   }
 
-  const ok = await waitReady();
-  log(`服务就绪：${ok}`);
-  if (ok) {
-    spawn('cmd', ['/c', 'start', '', `http://127.0.0.1:${PORT}`], { windowsHide: true, stdio: 'ignore' });
-  }
-
+  // 退出钩子要在「等就绪」之前装好：等就绪本身可能失败或很久，
+  // 装在它后面的话（首发版即如此）一旦抛错就再也收不到停止信号。
   const shutdown = () => {
     for (const c of children) {
       try {
@@ -189,6 +215,12 @@ async function main() {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+
+  const ok = await waitReady(PORT);
+  log(`服务就绪：${ok}`);
+  if (ok) {
+    spawn('cmd', ['/c', 'start', '', `http://127.0.0.1:${PORT}`], { windowsHide: true, stdio: 'ignore' });
+  }
 }
 
 main().catch((e) => log(`启动失败：${e && e.stack}`));

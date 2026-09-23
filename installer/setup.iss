@@ -44,7 +44,6 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 Compression=lzma2
 SolidCompression=yes
-LZMAUseSeparateProcess=yes
 LZMANumBlockThreads=4
 OutputDir={#MyOutDir}
 OutputBaseFilename=信息流编导工作台-Setup-{#MyAppVersion}
@@ -53,10 +52,11 @@ UninstallDisplayIcon={app}\启动工作台.vbs
 SetupIconFile=
 WizardStyle=modern
 WizardSmallImageFile=
-; 升级时先停掉正在跑的工作台，避免文件占用
-CloseApplications=yes
-CloseApplicationsFilter=node.exe
-RestartApplications=no
+; 升级时先停掉正在跑的工作台，避免文件占用。
+; 刻意不用 CloseApplications=yes：它对控制台进程关不掉时会弹「是否现在重启电脑」对话框，
+; 让编导做选择题，违背「零决策」原则。改由 [Code] PrepareToInstall 精确处理：
+; 按 pids.json 停 → 按可执行路径兜底清杀 → 等引擎 DLL 释放，全程无弹窗。
+CloseApplications=no
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
@@ -70,7 +70,22 @@ chinesesimp.ButtonInstall=安装
 chinesesimp.ButtonFinish=完成
 
 [Files]
-Source: "{#MyPayload}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 运行时二进制（node.exe / esbuild.exe）从主清单里排除。
+; 注意 Excludes 的匹配规则是实测出来的：只按「文件名」匹配、逗号分隔；
+; 写成相对路径 / 绝对路径 / 分号分隔都无效（会静默不排除）。
+; 包里只有 runtime\node\node.exe 与 @esbuild\win32-x64\esbuild.exe 两个同名文件，不会被误伤。
+Source: "{#MyPayload}\*"; DestDir: "{app}"; Excludes: "node.exe,esbuild.exe"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 这两个二进制改为单独安装，带 onlyifdoesntexist：目标已存在就原样跳过，绝不走「删除后替换」。
+; 原因（2026-09-23 实测）：升级时 Inno 会「先删旧文件再写新文件」，而部分机器的安全策略
+; 禁止删除 exe（与被占用无关，重命名却可以），结果报「DeleteFile 失败；错误代码 5」、
+; 整个安装回滚。跳过替换则彻底绕开这个坑：升级沿用已装好的运行时，功能不受影响。
+Source: "{#MyPayload}\runtime\node\node.exe"; DestDir: "{app}\runtime\node"; Flags: ignoreversion onlyifdoesntexist
+Source: "{#MyPayload}\node_modules\@esbuild\win32-x64\esbuild.exe"; DestDir: "{app}\node_modules\@esbuild\win32-x64"; Flags: ignoreversion onlyifdoesntexist
+; 另以 dontcopy 收进包：升级时 [Code] 用哈希比对判断确有更新后，再「原地覆盖」（不删除）。
+Source: "{#MyPayload}\runtime\node\node.exe"; DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#MyPayload}\node_modules\@esbuild\win32-x64\esbuild.exe"; DestDir: "{tmp}"; Flags: dontcopy
+; kill-nodes.ps1 同理：升级老版本时 {app} 里还没有它，必须从包自身解出兜底清杀脚本。
+Source: "{#MyPayload}\kill-nodes.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 
 ; 快捷方式不再用 [Icons] 段，改由下方 [Code] 代码创建，原因有二：
 ;   1. v1.1.0 曾把桌面图标写到 {commondesktop}（C:\Users\Public\Desktop），
@@ -85,16 +100,145 @@ Filename: "{app}\runtime\node\node.exe"; Parameters: """{app}\init-env.js"""; Fl
 Filename: "wscript.exe"; Parameters: """{app}\启动工作台.vbs"""; Description: "立即打开工作台"; Flags: postinstall nowait skipifsilent
 
 [UninstallRun]
-Filename: "wscript.exe"; Parameters: """{app}\停止工作台.vbs"""; Flags: runhidden
+; 卸载前先停工作台：pids.json 精确关 + 按路径兜底清杀（孤儿实例），都不弹窗
+Filename: "{app}\runtime\node\node.exe"; Parameters: """{app}\stop.js"""; RunOnceId: "StopWorkbench"; Flags: runhidden
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\kill-nodes.ps1"""; RunOnceId: "KillOrphanNode"; Flags: runhidden
 
 [UninstallDelete]
 ; 只删程序目录（Inno 默认行为）；数据目录在 {localappdata}\信息流编导工作台\data，
 ; 不在 {app} 内，因此卸载与升级都不会碰到编导的任务、资料包和成片。
 Type: files; Name: "{app}\.env"
+; 被 onlyifdoesntexist 跳过的运行时二进制不会进卸载清单，这里补删，避免卸载后残留
+Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\node_modules\@esbuild"
 
 [Code]
 var
   FailedLinks: TStringList;
+
+// 等某个引擎 DLL 释放：存在则每秒尝试删除一次（删除成功也无妨，随后写入新版），最多 60 秒。
+// 实测（2026-09-23）：进程被强制结束后的短时间内，本机安全软件可能仍扣住映像文件，
+// 10 秒等待不够；60 秒能扛过扣留期。
+function DllReleased(const P: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  if FileExists(P) = False then
+    Exit;
+  for I := 1 to 60 do
+  begin
+    if DeleteFile(P) then
+      Exit;
+    Sleep(1000);
+  end;
+  Result := False;
+end;
+
+// 升级旗标路径：插旗期间 launcher 拒绝启动（防止清杀后又被双击拉起、重新锁住文件）
+function UpgradeFlagPath(): String;
+begin
+  Result := ExpandConstant('{localappdata}') + '\信息流编导工作台\data\upgrade.lock';
+end;
+
+function LockAbortMsg(): String;
+begin
+  Result := '工作台正在运行，且未能自动停止。' + #13#10 +
+    '请先点桌面或开始菜单的「停止工作台」，稍后再运行本安装程序。';
+end;
+
+// 更新运行时二进制（node.exe / esbuild.exe）：只「原地覆盖」，绝不删除。
+// [Files] 里这两个文件带 onlyifdoesntexist，升级时会被跳过，所以这里负责「确有更新」的场景：
+//   哈希一致 → 什么都不做；哈希不同 → 备份 → 覆盖 → 校验 → 校验不过就回滚备份。
+// 任何一步失败都只往 installer-prep.log 记一行，绝不中断安装：编导机器上保留旧版运行时
+// 远比装出一个半成品强。
+procedure RefreshRuntimeBinary(const TempName, DestPath: String);
+var
+  Src, Bak, Mark: String;
+begin
+  Mark := ExpandConstant('{localappdata}') + '\信息流编导工作台\data\installer-prep.log';
+  Src := ExpandConstant('{tmp}') + '\' + TempName;
+  Bak := DestPath + '.bak';
+  if FileExists(Src) = False then
+    Exit;
+  if FileExists(DestPath) = False then
+  begin
+    // 目标不存在（旧版被安全软件清掉等）：直接放一份，保证 [Run] 能唤起
+    ForceDirectories(ExtractFileDir(DestPath));
+    if CopyFile(Src, DestPath, False) then
+      SaveStringToFile(Mark, 'runtime placed: ' + DestPath + #13#10, True)
+    else
+      SaveStringToFile(Mark, 'runtime MISSING: ' + DestPath + #13#10, True);
+    Exit;
+  end;
+  if GetSHA256OfFile(Src) = GetSHA256OfFile(DestPath) then
+    Exit; // 版本一致，跳过
+  DeleteFile(Bak);
+  CopyFile(DestPath, Bak, False);
+  if CopyFile(Src, DestPath, False) = False then
+  begin
+    DeleteFile(Bak);
+    SaveStringToFile(Mark, 'runtime keep-old(locked): ' + DestPath + #13#10, True);
+    Exit;
+  end;
+  if GetSHA256OfFile(Src) = GetSHA256OfFile(DestPath) then
+  begin
+    DeleteFile(Bak);
+    SaveStringToFile(Mark, 'runtime updated: ' + DestPath + #13#10, True);
+  end
+  else
+  begin
+    CopyFile(Bak, DestPath, False);
+    DeleteFile(Bak);
+    SaveStringToFile(Mark, 'runtime rolled-back: ' + DestPath + #13#10, True);
+  end;
+end;
+
+// 升级场景：工作台可能正在运行。运行中的 node 会映射 Prisma 引擎 DLL，
+// 直接替换会报「DeleteFile 失败；错误代码 5」。处理顺序：
+//   插升级旗标（launcher 见旗标拒启，免得清杀后又被双击拉起）→ stop.js 按 pids.json 精确关 →
+//   kill-nodes.ps1 按可执行路径兜底清杀（孤儿实例）→ 等引擎 DLL 释放（最长 60 秒）→
+//   运行时二进制原地覆盖 → 仍锁住则给出明确指引并中止，避免装成半吊子。
+// 注意：node.exe / esbuild.exe **不在这里等释放**——本机实测「删除 exe」会被安全策略拦截
+// （与占用无关），把它们放进等待清单只会白白失败；它们改由 RefreshRuntimeBinary 覆盖更新。
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  NodeExe, StopJs, Ps1: String;
+  Code, CodePs: Integer;
+  OkStop, OkPs: Boolean;
+begin
+  Result := '';
+  NodeExe := ExpandConstant('{app}') + '\runtime\node\node.exe';
+  StopJs := ExpandConstant('{app}') + '\stop.js';
+  Ps1 := ExpandConstant('{app}') + '\kill-nodes.ps1';
+  if (FileExists(NodeExe) = False) or (FileExists(StopJs) = False) then
+    Exit; // 首次安装没有可停的东西
+  SaveStringToFile(UpgradeFlagPath(), '1', False);
+  Exec(NodeExe, '"' + StopJs + '"', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code);
+  OkStop := (Code = 0);
+  // 兜底清杀脚本与运行时二进制都必须从安装包自身解出：升级老版本时 {app} 里还没有它们
+  ExtractTemporaryFile('kill-nodes.ps1');
+  ExtractTemporaryFile('node.exe');
+  ExtractTemporaryFile('esbuild.exe');
+  Ps1 := ExpandConstant('{tmp}') + '\kill-nodes.ps1';
+  OkPs := Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + Ps1 + '"',
+    ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, CodePs);
+  // 诊断痕迹：写到数据目录（Inno 的 {tmp} 会随安装结束销毁，不能落那里）
+  SaveStringToFile(ExpandConstant('{localappdata}') + '\信息流编导工作台\data\installer-prep.log',
+    'stop.js execOk=' + IntToStr(Ord(OkStop)) + ' code=' + IntToStr(Code) + #13#10 +
+    'ps1 execOk=' + IntToStr(Ord(OkPs)) + ' code=' + IntToStr(CodePs) + #13#10, False);
+  if DllReleased(ExpandConstant('{app}') + '\node_modules\.prisma\client\query_engine-windows.dll.node') = False then begin Result := LockAbortMsg(); Exit; end;
+  if DllReleased(ExpandConstant('{app}') + '\node_modules\prisma\client\query_engine-windows.dll.node') = False then begin Result := LockAbortMsg(); Exit; end;
+  // 运行时二进制：不删除，只在确有版本变化时原地覆盖（失败也只是沿用旧版）
+  RefreshRuntimeBinary('node.exe', NodeExe);
+  RefreshRuntimeBinary('esbuild.exe', ExpandConstant('{app}') + '\node_modules\@esbuild\win32-x64\esbuild.exe');
+end;
+
+procedure DeinitializeSetup();
+begin
+  // 无论装完还是中止，都摘掉升级旗标（文件不存在时删除是无害的）
+  DeleteFile(UpgradeFlagPath());
+end;
 
 // 创建单个快捷方式；失败只记录不抛出（CreateShellLink 失败时可能抛异常，也可能返回错误描述，两种都接住）
 procedure CreateLinkOrSkip(const LinkPath, Comment, Target, Params, WorkDir, IconFile: String);
