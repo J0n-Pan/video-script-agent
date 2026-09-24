@@ -13,6 +13,12 @@ _scratch/
 next-env.d.ts
 tsconfig.tsbuildinfo
 dist/
+# 交付文档（编导操作手册 / 验收步骤 / 表格等）：只留本地，绝不进公开仓库
+*.docx
+*.doc
+*.xlsx
+*.xls
+*.pdf
 # 统一初始口令：只进安装包，绝不进公开仓库
 installer/initial-accounts.local.json
 # AI 配置（含真实密钥）：只进安装包，绝不进公开仓库
